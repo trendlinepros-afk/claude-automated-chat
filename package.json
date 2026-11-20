@@ -1,0 +1,71 @@
+{
+  "name": "agent-relay",
+  "productName": "Agent Relay",
+  "version": "1.0.0",
+  "description": "LAN MCP chat hub that lets multiple Claude Desktop agents hand off jobs, files and images to each other.",
+  "main": "src/main.js",
+  "author": "trendlinepros-afk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trendlinepros-afk/claude-automated-chat.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "server": "node scripts/headless.js",
+    "test": "node test/run.js",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.11",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.trendlinepros.agentrelay",
+    "productName": "Agent Relay",
+    "artifactName": "Agent-Relay-Setup.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agent Relay"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "trendlinepros-afk",
+        "repo": "claude-automated-chat",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

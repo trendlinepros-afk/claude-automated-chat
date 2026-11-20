@@ -1,0 +1,50 @@
+name: Build & Release
+
+# Every push to main builds the Windows installer and publishes a GitHub Release.
+# The installed app's auto-updater reads these releases (latest.yml).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Set version (major.minor from package.json, patch = run number)
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const p=require('./package.json');const [a,b]=p.version.split('.');p.version=a+'.'+b+'.'+process.env.GITHUB_RUN_NUMBER;fs.writeFileSync('package.json',JSON.stringify(p,null,2));console.log('Version',p.version)"
+
+      - name: Build and publish installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            dist/*.exe
+            dist/latest.yml
