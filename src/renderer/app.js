@@ -327,9 +327,13 @@ function updateSnippet() {
   const server = c.tls
     ? { command: 'npx', args: ['-y', 'mcp-remote@latest', url, '--transport', 'http-only'], env: { NODE_EXTRA_CA_CERTS: CA_PATH } }
     : { command: 'npx', args: ['-y', 'mcp-remote@latest', url, '--allow-http', '--transport', 'http-only'] };
-  $('#conn-snippet').textContent = JSON.stringify({ mcpServers: { 'agent-relay': server } }, null, 2);
+  // Only the entry itself — pasting a whole { "mcpServers": … } object into an existing config breaks it.
+  $('#conn-snippet').textContent = '"agent-relay": ' + JSON.stringify(server, null, 2);
+  $('#setup-cert-note').classList.toggle('hidden', !c.tls);
+  const reqId = (updateSnippet.req = (updateSnippet.req || 0) + 1);
+  relay.setupScript($('#conn-agent').value, $('#conn-ip').value).then(t => { if (reqId === updateSnippet.req) $('#conn-setup').textContent = t; });
   $('#trust-step').classList.toggle('hidden', !c.tls);
-  $('#cfg-step-title').textContent = c.tls ? '3. Add the relay to Claude Desktop' : '2. Add the relay to Claude Desktop';
+  $('#cfg-step-title').textContent = c.tls ? 'B. Add the relay to Claude Desktop' : 'Add the relay to Claude Desktop';
   if (c.tls) {
     const host = $('#conn-ip').value || 'localhost';
     $('#conn-fp').textContent = c.caHash;
@@ -348,7 +352,9 @@ function updateSnippet() {
 }
 $('#conn-agent').addEventListener('input', updateSnippet);
 $('#conn-ip').addEventListener('change', updateSnippet);
-$('#btn-copy-snippet').onclick = () => { relay.copy($('#conn-snippet').textContent); toast('Config copied'); };
+$('#btn-copy-snippet').onclick = () => { relay.copy($('#conn-snippet').textContent); toast('Entry copied — paste it inside your existing "mcpServers" block', 5000); };
+$('#btn-copy-setup').onclick = () => { relay.copy($('#conn-setup').textContent); toast('Setup script copied — paste it into PowerShell on the dev PC', 5000); };
+$('#btn-save-setup').onclick = async () => { if (await relay.saveSetupScript($('#conn-agent').value, $('#conn-ip').value)) toast('Saved — on the dev PC right-click it → Run with PowerShell', 5000); };
 $('#btn-copy-trust').onclick = () => { relay.copy($('#conn-trust').textContent); toast('Command copied — run it in PowerShell on the dev PC'); };
 $('#btn-save-ca').onclick = async () => { if (await relay.saveCa()) toast('Certificate saved — copy it to C:\\AgentRelay\\relay-ca.pem on each dev PC', 5000); };
 $('#btn-enable-tls').onclick = async () => {

@@ -35,6 +35,16 @@ Everything is stored as an **Obsidian-compatible markdown vault**, and old histo
 
 Everything below is generated, ready to copy, on the app's **Connect agents** page. Type the PC's agent name there first.
 
+**Easiest: one-paste setup.** Install Node.js LTS on the dev PC, then click **Copy setup script** (or **Save as .ps1 file…**) and paste it into PowerShell on the dev PC. No admin rights are needed. The script:
+- downloads the relay certificate and checks its fingerprint (it stops if it doesn't match)
+- backs up `claude_desktop_config.json` and adds the `agent-relay` entry **without touching your other MCP servers or settings**; a stray trailing comma is fixed automatically
+- if the existing config is broken in another way (e.g. a whole `{ "mcpServers": … }` snippet pasted as a second object), changes nothing and prints the offending lines
+
+Then fully quit Claude Desktop (tray icon → Quit) and start it again. Works in Windows PowerShell 5.1 and PowerShell 7, and is tested in CI on both, including a live MCP connection through the config it writes.
+
+**By hand (alternative):**
+
+
 1. Install **Node.js LTS** (https://nodejs.org) on the dev PC. It provides `npx`.
 2. **Trust the relay's certificate (one time per PC).** Traffic is encrypted with HTTPS using the relay's own certificate authority. Run the command shown on the Connect page in PowerShell on the dev PC:
 
@@ -43,7 +53,7 @@ Everything below is generated, ready to copy, on the app's **Connect agents** pa
    ```
 
    It prints a fingerprint that **must match** the one shown in the app. If it doesn't, delete the file and stop. You can instead use **Save the certificate file…** and copy it over by USB or a share.
-3. Open Claude Desktop → **Settings → Developer → Edit Config**, merge the snippet into `claude_desktop_config.json`, and restart Claude Desktop:
+3. Open Claude Desktop → **Settings → Developer → Edit Config** and add the `agent-relay` entry **inside the existing `"mcpServers"` block** (don't paste a second `{ … }` object around it; that causes *"Couldn't load app settings … Expected double-quoted property name"*). The whole file should look like:
 
 ```json
 {

@@ -10,6 +10,7 @@ const { Settings } = require('./settings');
 const { Updater } = require('./updater');
 const { BackupManager, uncRoot, netUse } = require('./backup');
 const { ensureCerts } = require('./tls');
+const { buildSetupScript } = require('./setupScript');
 
 log.initialize();
 log.transports.file.maxSize = 5 * 1024 * 1024;
@@ -273,6 +274,22 @@ function registerIpc() {
     const a = store.getAttachment(String(id));
     if (!a) return false;
     if (SAFE_OPEN_EXT.test(a.abs)) shell.openPath(a.abs); else shell.showItemInFolder(a.abs);
+    return true;
+  });
+  const setupScriptFor = (agent, host) => {
+    const info = relay.connectionInfo();
+    const name = String(agent || 'DevPC-1').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 40) || 'DevPC-1';
+    const h = String(host || 'localhost').replace(/[^A-Za-z0-9_.:-]/g, '');
+    const server = `${info.protocol}://${h}:${info.port}`;
+    const url = `${server}/mcp/${name}${info.key ? `?key=${info.key}` : ''}`;
+    return { name, text: buildSetupScript({ url, server, tls: info.tls, caHash: info.caHash, agent: name }) };
+  };
+  ipcMain.handle('relay:setupScript', (_e, agent, host) => setupScriptFor(agent, host).text);
+  ipcMain.handle('relay:saveSetupScript', async (_e, agent, host) => {
+    const { name, text } = setupScriptFor(agent, host);
+    const r = await dialog.showSaveDialog(win, { title: 'Save the setup script (run it on the dev PC)', defaultPath: `AgentRelay-setup-${name}.ps1`, filters: [{ name: 'PowerShell script', extensions: ['ps1'] }] });
+    if (r.canceled || !r.filePath) return false;
+    fs.writeFileSync(r.filePath, '\ufeff' + text + "Read-Host 'Press Enter to close'\r\n"); // BOM so Windows PowerShell 5.1 reads it as UTF-8
     return true;
   });
   ipcMain.handle('relay:saveCa', async () => {

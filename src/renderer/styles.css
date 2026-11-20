@@ -193,3 +193,7 @@ pre.code { background: var(--code-bg); border: 1px solid var(--border); border-r
 .err-text { color: var(--err); font-size: 13px; margin-right: auto; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 16px; }
 .lock { font-size: 12px; padding: 1px 7px; border-radius: 8px; border: 1px solid var(--ok); color: var(--ok); margin-left: 6px; white-space: nowrap; }
+pre.code.tall { max-height: 230px; overflow: auto; white-space: pre; word-break: normal; }
+details.manual { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+details.manual summary { cursor: pointer; font-weight: 600; }
+details.manual[open] summary { margin-bottom: 4px; }

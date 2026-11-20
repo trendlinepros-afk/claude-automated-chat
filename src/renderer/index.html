@@ -100,18 +100,23 @@
           <h2>Add a Claude Desktop computer</h2>
           <div class="row"><label>Agent name for that PC</label><input id="conn-agent" value="DevPC-1" maxlength="40"></div>
           <div class="row"><label>Server address</label><select id="conn-ip"></select></div>
-          <h3>1. Install Node.js</h3>
-          <p class="muted">Install <a href="https://nodejs.org" target="_blank">Node.js LTS</a> on the dev PC (provides <code>npx</code>).</p>
-          <div id="trust-step">
-            <h3>2. Trust this relay's certificate (one time per PC)</h3>
-            <p class="muted">Run this in PowerShell on the dev PC. It downloads the relay's public certificate and prints its fingerprint — it <b>must</b> match <code id="conn-fp"></code>. If it doesn't, delete the file and don't continue.</p>
-            <pre id="conn-trust" class="code"></pre>
-            <button id="btn-copy-trust" class="ghost small">Copy command</button> <button id="btn-save-ca" class="ghost small">Or save the certificate file…</button>
-          </div>
-          <h3 id="cfg-step-title">3. Add the relay to Claude Desktop</h3>
-          <p class="muted">Claude Desktop → Settings → Developer → Edit Config, merge this into <code>claude_desktop_config.json</code>, then restart Claude Desktop.</p>
-          <pre id="conn-snippet" class="code"></pre>
-          <button id="btn-copy-snippet" class="primary small">Copy config</button>
+          <h3>Easiest: one-paste setup <span class="badge">recommended</span></h3>
+          <p class="muted">On the dev PC: install <a href="https://nodejs.org" target="_blank">Node.js LTS</a>, then open <b>PowerShell</b> and paste this whole block. It <span id="setup-cert-note">downloads and verifies the relay certificate, </span>backs up <code>claude_desktop_config.json</code> and adds Agent Relay to it <b>without touching your other MCP servers</b>. If your config is already broken it changes nothing and shows you the bad lines. Then fully quit and restart Claude Desktop.</p>
+          <pre id="conn-setup" class="code tall"></pre>
+          <button id="btn-copy-setup" class="primary small">Copy setup script</button> <button id="btn-save-setup" class="ghost small">Save as .ps1 file…</button>
+          <details class="manual">
+            <summary>Or set it up by hand</summary>
+            <div id="trust-step">
+              <h3>A. Trust this relay's certificate (one time per PC)</h3>
+              <p class="muted">Run this in PowerShell on the dev PC. It downloads the relay's public certificate and prints its fingerprint — it <b>must</b> match <code id="conn-fp"></code>. If it doesn't, delete the file and don't continue.</p>
+              <pre id="conn-trust" class="code"></pre>
+              <button id="btn-copy-trust" class="ghost small">Copy command</button> <button id="btn-save-ca" class="ghost small">Or save the certificate file…</button>
+            </div>
+            <h3 id="cfg-step-title">B. Add the relay to Claude Desktop</h3>
+            <p class="muted">Claude Desktop → Settings → Developer → Edit Config. Paste this entry <b>inside the existing <code>"mcpServers": { … }</code> block</b>, with a comma after the server before it. <b>Don't</b> paste another <code>{ … }</code> around it. If the file has no <code>"mcpServers"</code> yet, add <code>"mcpServers": { <i>entry</i> }</code> as a new top-level key.</p>
+            <pre id="conn-snippet" class="code"></pre>
+            <button id="btn-copy-snippet" class="ghost small">Copy entry</button>
+          </details>
           <h3>Claude Code (optional)</h3>
           <pre id="conn-cc" class="code"></pre>
           <button id="btn-copy-cc" class="ghost small">Copy command</button>

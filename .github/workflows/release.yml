@@ -38,6 +38,9 @@ jobs:
       - name: Backup & restore over the real network share
         run: node test/smb-backup.js
 
+      - name: One-paste setup script (PowerShell 5.1 + 7, real config merge, live MCP connection)
+        run: node test/setup-script-win.js
+
       - name: Set version (major.minor from package.json, patch = run number)
         id: ver
         shell: bash
