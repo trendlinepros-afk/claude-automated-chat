@@ -30,6 +30,24 @@ function dirStats(dir) {
   return { files, bytes };
 }
 
+/**
+ * Connect to a Windows share with explicit credentials (`net use`). Resolves {ok, message}.
+ * Uses execFile (no shell), so user/password are passed as literal arguments.
+ */
+function netUse(root, user, pass, execFileImpl) {
+  const execFile = execFileImpl || require('child_process').execFile;
+  return new Promise(resolve => {
+    if (process.platform !== 'win32' && !execFileImpl) return resolve({ ok: true, message: 'not windows' });
+    if (!root || !user) return resolve({ ok: true, message: 'no credentials' });
+    execFile('net', ['use', root, String(pass || ''), `/user:${user}`, '/persistent:no'], { windowsHide: true, timeout: 30000 }, (err, out, errOut) => {
+      const msg = String(errOut || out || (err && err.message) || '').trim();
+      // 1219 = already connected to this server (possibly with other credentials); 85 = name already in use.
+      if (!err || /\b(1219|85)\b/.test(msg)) return resolve({ ok: true, message: msg || 'connected' });
+      resolve({ ok: false, message: msg.replace(/\s+/g, ' ').slice(0, 300) });
+    });
+  });
+}
+
 /** Extract "\\server\share" from a UNC path, or null. */
 function uncRoot(p) {
   const m = String(p || '').match(/^\\\\([^\\/]+)[\\/]([^\\/]+)/);
@@ -74,11 +92,23 @@ class BackupManager {
     const s = this.d.getSettings();
     const target = String(s.backupPath || '').trim();
     if (!target) throw new Error('No backup folder configured. Set a network share path in Settings → Backup.');
-    if (this.d.connectShare) await this.d.connectShare(target);
-    fs.mkdirSync(target, { recursive: true });
-    // Verify we can write.
-    const probe = path.join(target, `.write-test-${process.pid}`);
-    fs.writeFileSync(probe, 'ok'); fs.unlinkSync(probe);
+    if (!path.isAbsolute(target) && !uncRoot(target)) throw new Error('Backup folder must be an absolute path or a UNC path like \\\\server\\share\\folder');
+    const vault = path.resolve(this.d.getVaultPath());
+    const resolved = path.resolve(target);
+    if (resolved === vault || resolved.startsWith(vault + path.sep)) throw new Error('The backup folder cannot be inside the vault');
+    let shareMsg = '';
+    if (this.d.connectShare) {
+      const r = await this.d.connectShare(target);
+      if (r && r.ok === false) shareMsg = ` (net use: ${r.message})`;
+    }
+    try {
+      fs.mkdirSync(target, { recursive: true });
+      const probe = path.join(target, `.write-test-${process.pid}-${Date.now()}`);
+      fs.writeFileSync(probe, 'ok'); fs.unlinkSync(probe);
+    } catch (e) {
+      const why = { EACCES: 'access denied', EPERM: 'access denied', ENOENT: 'path not found', UNKNOWN: 'share unreachable or access denied', EBUSY: 'busy' }[e.code] || e.code || e.message;
+      throw new Error(`Cannot write to ${target}: ${why}${shareMsg}. Check the path, that the share is online, and the share credentials.`);
+    }
     return target;
   }
 
@@ -154,6 +184,7 @@ class BackupManager {
   }
 
   static validate(dir) {
+    if (!dir || typeof dir !== 'string') throw new Error('No backup folder given');
     const m = path.join(dir, 'manifest.json');
     if (!fs.existsSync(m) || !fs.existsSync(path.join(dir, 'vault'))) throw new Error('That folder is not an Agent Relay backup (manifest.json / vault missing)');
     const manifest = JSON.parse(fs.readFileSync(m, 'utf8'));
@@ -206,4 +237,4 @@ class BackupManager {
   }
 }
 
-module.exports = { BackupManager, uncRoot, PREFIX };
+module.exports = { BackupManager, uncRoot, netUse, PREFIX };

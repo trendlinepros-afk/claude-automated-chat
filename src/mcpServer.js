@@ -5,7 +5,7 @@
  * Endpoints
  *   POST|GET|DELETE /mcp/<AgentName>?key=<accessKey>   MCP endpoint (one URL per agent)
  *   POST /upload/<AgentName>?key=..&filename=..        raw upload, returns attachment id
- *   GET  /files/<attachmentId>?key=..                  download an attachment
+ *   GET  /files/<AgentName>/<attachmentId>?key=..      download an attachment visible to that agent
  *   GET  /health                                       liveness probe (no auth)
  */
 const http = require('http');
@@ -21,6 +21,12 @@ const MAX_BODY = 60 * 1024 * 1024;
 const MAX_INLINE_IMAGE = 3.5 * 1024 * 1024;
 const MAX_INLINE_TEXT = 120 * 1024;
 const SESSION_IDLE_MS = 60 * 60 * 1000;
+const MAX_SESSIONS_TOTAL = 200;
+const MAX_SESSIONS_PER_AGENT = 16;
+const AUTH_FAIL_LIMIT = 20;            // failed attempts per IP…
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // …within this window → blocked for the rest of it
+const SAFE_INLINE = /^image\/(png|jpeg|gif|webp|bmp)$/;
+const MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/i;
 
 const INSTRUCTIONS = `You are connected to Agent Relay, a shared chat + job board used by several Claude agents and a human operator.
 Your agent name is fixed by the URL you connected with (see whoami).
@@ -54,7 +60,7 @@ function readBody(req, limit = MAX_BODY) {
 
 function sendJson(res, status, obj) {
   if (res.headersSent) return;
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
 
@@ -84,11 +90,11 @@ const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: `Error: ${t}` }], isError: true });
 
 const attachmentInput = z.array(z.object({
-  filename: z.string().describe('File name including extension, e.g. "report.md" or "screenshot.png"'),
-  text: z.string().optional().describe('File content for text files'),
-  base64: z.string().optional().describe('Base64 content for binary files (images, pdf, zip...)'),
+  filename: z.string().min(1).max(200).describe('File name including extension, e.g. "report.md" or "screenshot.png"'),
+  text: z.string().max(25 * 1024 * 1024).optional().describe('File content for text files'),
+  base64: z.string().max(40 * 1024 * 1024).optional().describe('Base64 content for binary files (images, pdf, zip...)'),
   mime_type: z.string().optional()
-})).optional().describe('Files to attach (text or base64)');
+})).max(20).optional().describe('Files to attach (text or base64)');
 
 class RelayServer {
   constructor(store, getSettings, log = console) {
@@ -96,22 +102,51 @@ class RelayServer {
     this.getSettings = getSettings;
     this.log = log;
     this.sessions = new Map(); // sessionId -> {transport, server, agent, lastActivity}
+    this.authFails = new Map(); // ip -> {count, since}
     this.httpServer = null;
     this.status = { running: false, error: null, port: null };
   }
 
   // ---------- auth / routing ----------
+  _blocked(ip) {
+    const f = this.authFails.get(ip);
+    if (!f) return false;
+    if (Date.now() - f.since > AUTH_FAIL_WINDOW_MS) { this.authFails.delete(ip); return false; }
+    return f.count >= AUTH_FAIL_LIMIT;
+  }
+
+  _recordFail(ip) {
+    const now = Date.now();
+    const f = this.authFails.get(ip);
+    if (!f || now - f.since > AUTH_FAIL_WINDOW_MS) this.authFails.set(ip, { count: 1, since: now });
+    else f.count++;
+    if (this.authFails.size > 5000) this.authFails.clear(); // memory guard
+    const c = this.authFails.get(ip);
+    if (c && c.count === AUTH_FAIL_LIMIT) this.log.warn ? this.log.warn(`[security] blocking ${ip} for repeated bad access keys`) : this.log.info(`[security] blocking ${ip}`);
+  }
+
   _authorized(req, url) {
     const s = this.getSettings();
     if (!s.requireKey || !s.accessKey) return true;
     const auth = req.headers['authorization'] || '';
     const given = url.searchParams.get('key') || req.headers['x-relay-key'] || (auth.startsWith('Bearer ') ? auth.slice(7) : '');
-    const a = Buffer.from(String(given)); const b = Buffer.from(s.accessKey);
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
+    // Compare fixed-length digests so neither content nor length leaks through timing.
+    const a = crypto.createHash('sha256').update(String(given)).digest();
+    const b = crypto.createHash('sha256').update(String(s.accessKey)).digest();
+    return crypto.timingSafeEqual(a, b) && String(given).length > 0;
   }
 
   _agentFrom(req, url, segment) {
-    return decodeURIComponent(segment || '') || req.headers['x-agent-name'] || url.searchParams.get('agent') || '';
+    let seg = '';
+    try { seg = decodeURIComponent(segment || ''); } catch { seg = ''; }
+    return seg || req.headers['x-agent-name'] || url.searchParams.get('agent') || '';
+  }
+
+  /** Name usable by a network agent: valid and not the human operator's name. */
+  _agentAllowed(name) {
+    if (!this.store.validName(name)) return 'Agent name missing or invalid. Connect to /mcp/<AgentName> (start with a letter/digit; letters, digits, _ . - only; max 40).';
+    if (name.toLowerCase() === String(this.store.operatorName).toLowerCase()) return `"${name}" is reserved for the human operator. Pick another agent name.`;
+    return null;
   }
 
   async start() {
@@ -122,7 +157,9 @@ class RelayServer {
       sendJson(res, e.status || 500, { error: e.message });
     }));
     this.httpServer.requestTimeout = 0;      // allow long-poll / SSE
-    this.httpServer.headersTimeout = 60000;
+    this.httpServer.headersTimeout = 30000;
+    this.httpServer.maxHeadersCount = 100;
+    this.httpServer.maxConnections = 500;
     await new Promise((resolve, reject) => {
       this.httpServer.once('error', reject);
       this.httpServer.listen(s.port, s.host || '0.0.0.0', () => { this.httpServer.off('error', reject); resolve(); });
@@ -163,40 +200,56 @@ class RelayServer {
   async _handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
-    if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS' }); return res.end(); }
+    const ip = req.socket.remoteAddress || 'unknown';
+    // No CORS: MCP clients are not browsers. Without CORS headers a malicious web page cannot read responses.
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
     if (parts[0] === 'health') return sendJson(res, 200, { ok: true, app: 'agent-relay', sessions: this.sessions.size });
     // Respond 404 to OAuth discovery so mcp-remote does not start an OAuth flow.
     if (parts[0] === '.well-known') return sendJson(res, 404, { error: 'not found' });
 
+    if (this._blocked(ip)) return sendJson(res, 429, { error: 'Too many failed attempts. Try again later.' });
     if (!this._authorized(req, url)) {
+      this._recordFail(ip);
       // 403 (not 401) on purpose: 401 makes MCP clients attempt OAuth.
       return sendJson(res, 403, { error: 'Invalid or missing access key. Append ?key=<access key> to the URL.' });
     }
+    this.authFails.delete(ip);
 
     if (parts[0] === 'mcp') return this._handleMcp(req, res, url, parts[1]);
     if (parts[0] === 'upload' && req.method === 'POST') return this._handleUpload(req, res, url, parts[1]);
-    if (parts[0] === 'files' && parts[1]) return this._handleFile(req, res, parts[1]);
+    if (parts[0] === 'files' && parts[1] && parts[2] && req.method === 'GET') return this._handleFile(req, res, parts[1], parts[2]);
     return sendJson(res, 404, { error: 'Not found. MCP endpoint is /mcp/<AgentName>' });
   }
 
   async _handleUpload(req, res, url, seg) {
     const agent = this._agentFrom(req, url, seg);
-    if (!this.store.validName(agent)) return sendJson(res, 400, { error: 'Agent name required: /upload/<AgentName>' });
+    const bad = this._agentAllowed(agent);
+    if (bad) return sendJson(res, 400, { error: bad });
     const name = url.searchParams.get('filename') || 'upload.bin';
     const buf = await readBody(req);
-    const meta = this.store.saveAttachment(name, buf, req.headers['content-type'] && req.headers['content-type'] !== 'application/octet-stream' ? req.headers['content-type'] : guessMime(name), agent);
+    const ct = String(req.headers['content-type'] || '').split(';')[0].trim();
+    const mime = ct && ct !== 'application/octet-stream' && MIME_RE.test(ct) ? ct.toLowerCase() : guessMime(name);
+    const meta = this.store.saveAttachment(name, buf, mime, agent);
     this.store.touchAgent(agent);
     sendJson(res, 200, { attachment_id: meta.id, name: meta.name, size: meta.size, mime: meta.mime });
   }
 
-  _handleFile(req, res, id) {
-    const att = this.store.getAttachment(decodeURIComponent(id));
-    if (!att) return sendJson(res, 404, { error: 'No such attachment' });
-    res.writeHead(200, { 'Content-Type': att.meta.mime, 'Content-Length': att.meta.size, 'Content-Disposition': `inline; filename="${encodeURIComponent(att.meta.name)}"` });
+  _handleFile(req, res, agentSeg, idSeg) {
+    let agent, id;
+    try { agent = decodeURIComponent(agentSeg); id = decodeURIComponent(idSeg); } catch { return sendJson(res, 400, { error: 'Bad path' }); }
+    const att = this.store.getAttachment(id);
+    if (!att || this._agentAllowed(agent) || !this.store.canSeeAttachment(agent, id)) return sendJson(res, 404, { error: 'No such attachment' });
+    const inline = SAFE_INLINE.test(att.meta.mime);
+    res.writeHead(200, {
+      // Never let the browser render uploaded HTML/SVG/JS: only plain raster images inline, everything else as a download.
+      'Content-Type': inline ? att.meta.mime : 'application/octet-stream',
+      'Content-Length': att.meta.size,
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(att.meta.name)}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'no-store'
+    });
     require('fs').createReadStream(att.abs).pipe(res);
   }
 
@@ -210,6 +263,8 @@ class RelayServer {
 
     if (sid && this.sessions.has(sid)) {
       const sess = this.sessions.get(sid);
+      const urlAgent = this._agentFrom(req, url, seg);
+      if (urlAgent && urlAgent !== sess.agent) return sendJson(res, 403, { jsonrpc: '2.0', error: { code: -32000, message: 'Session belongs to a different agent' }, id: null });
       sess.lastActivity = Date.now();
       this.store.touchAgent(sess.agent);
       return sess.transport.handleRequest(req, res, body);
@@ -217,9 +272,11 @@ class RelayServer {
 
     if (req.method === 'POST' && !sid && body && (Array.isArray(body) ? body.some(isInitializeRequest) : isInitializeRequest(body))) {
       const agent = this._agentFrom(req, url, seg);
-      if (!this.store.validName(agent)) {
-        return sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32000, message: 'Agent name missing or invalid. Connect to /mcp/<AgentName> (letters, digits, _ . - only).' }, id: null });
-      }
+      const bad = this._agentAllowed(agent);
+      if (bad) return sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32000, message: bad }, id: null });
+      const mine = [...this.sessions.values()].filter(x => x.agent === agent).sort((x, y) => x.lastActivity - y.lastActivity);
+      if (mine.length >= MAX_SESSIONS_PER_AGENT) { try { await mine[0].transport.close(); } catch { /* ignore */ } } // drop the stalest
+      if (this.sessions.size >= MAX_SESSIONS_TOTAL) return sendJson(res, 503, { jsonrpc: '2.0', error: { code: -32000, message: 'Too many sessions' }, id: null });
       const server = this._buildServer(agent);
       let sessionRef;
       const transport = new StreamableHTTPServerTransport({
@@ -253,11 +310,13 @@ class RelayServer {
       if (a.base64 != null) buf = Buffer.from(a.base64.replace(/^data:[^;]+;base64,/, ''), 'base64');
       else if (a.text != null) buf = Buffer.from(a.text, 'utf8');
       else throw new Error(`Attachment ${a.filename} needs "text" or "base64"`);
-      out.push(this.store.saveAttachment(a.filename, buf, a.mime_type || guessMime(a.filename), agent));
+      const mime = a.mime_type && MIME_RE.test(a.mime_type) ? a.mime_type.toLowerCase() : guessMime(a.filename);
+      out.push(this.store.saveAttachment(a.filename, buf, mime, agent));
     }
+    if ((list || []).length + (ids || []).length > 20) throw new Error('At most 20 attachments per call');
     for (const id of ids || []) {
       const got = this.store.getAttachment(id);
-      if (!got) throw new Error(`Unknown attachment id ${id}`);
+      if (!got || !this.store.canSeeAttachment(agent, id)) throw new Error(`Unknown attachment id ${id}`);
       out.push(got.meta);
     }
     return out;
@@ -289,6 +348,10 @@ class RelayServer {
       }
     }
     return content;
+  }
+
+  _jobVisible(j, agent) {
+    return !!j && (j.from === agent || j.to === agent || j.to === BROADCAST || j.claimedBy === agent);
   }
 
   _buildServer(agent) {
@@ -392,10 +455,10 @@ class RelayServer {
       inputSchema: { attachment_id: z.string() }
     }, wrap(async ({ attachment_id }) => {
       const got = store.getAttachment(attachment_id);
-      if (!got) return fail('No such attachment (it may have been pruned).');
+      if (!got || !store.canSeeAttachment(agent, attachment_id)) return fail('No such attachment (it may have been pruned).');
       const { meta } = got;
       const s = this.getSettings();
-      const dl = `Download: http://<relay-host>:${s.port}/files/${meta.id}${s.requireKey ? '?key=<key>' : ''}`;
+      const dl = `Download: http://<relay-host>:${s.port}/files/${agent}/${meta.id}${s.requireKey ? '?key=<key>' : ''}`;
       if (/^image\//.test(meta.mime) && meta.size <= MAX_INLINE_IMAGE && meta.mime !== 'image/svg+xml') {
         return { content: [{ type: 'text', text: `${meta.name} (${meta.mime}, ${meta.size} bytes)` }, { type: 'image', data: got.read().toString('base64'), mimeType: meta.mime }] };
       }
@@ -434,7 +497,7 @@ class RelayServer {
         include_finished: z.boolean().optional()
       }
     }, wrap(async ({ status, scope = 'mine', include_finished = false }) => {
-      let list = store.listJobs({ status, activeOnly: !include_finished && !status });
+      let list = store.listJobs({ status, activeOnly: !include_finished && !status }).filter(j => this._jobVisible(j, agent));
       if (scope === 'mine') list = list.filter(j => j.to === agent || j.from === agent || j.to === BROADCAST);
       if (scope === 'assigned_to_me') list = list.filter(j => j.to === agent || (j.to === BROADCAST && (!j.claimedBy || j.claimedBy === agent)));
       if (scope === 'created_by_me') list = list.filter(j => j.from === agent);
@@ -447,7 +510,7 @@ class RelayServer {
       inputSchema: { job_id: z.string() }
     }, wrap(async ({ job_id }) => {
       const j = store.getJob(job_id);
-      if (!j) return fail('No such job');
+      if (!j || !this._jobVisible(j, agent)) return fail('No such job');
       const content = [{ type: 'text', text: fmtJob(j, true) }];
       for (const a of j.attachments) {
         const got = store.getAttachment(a.id);
@@ -469,7 +532,8 @@ class RelayServer {
       }
     }, wrap(async (a) => {
       const job0 = store.getJob(a.job_id);
-      if (!job0) return fail('No such job');
+      if (!job0 || !this._jobVisible(job0, agent)) return fail('No such job');
+      if (job0.to === BROADCAST && job0.claimedBy && job0.claimedBy !== agent && job0.from !== agent) return fail(`This job was claimed by ${job0.claimedBy}; only they or ${job0.from} can update it.`);
       if (a.status === 'claimed' && job0.to === BROADCAST && job0.claimedBy && job0.claimedBy !== agent) return fail(`Already claimed by ${job0.claimedBy}`);
       const atts = this._saveInputAttachments(agent, a.attachments, a.attachment_ids);
       const job = store.updateJob(a.job_id, agent, { status: a.status, note: a.note, result: a.result, attachments: atts });
@@ -499,7 +563,7 @@ class RelayServer {
       description: 'Full-text search across notes, jobs and chat history.',
       inputSchema: { query: z.string(), limit: z.number().int().min(1).max(100).optional() }
     }, wrap(async ({ query, limit }) => {
-      const hits = store.searchVault(query, limit || 30);
+      const hits = store.searchVault(query, limit || 30, agent).filter(h => h.type !== 'job' || this._jobVisible(store.getJob(h.id), agent));
       return text(hits.length ? hits.map(h => h.type === 'note' ? `[note] ${h.path}: …${h.snippet}…` : h.type === 'job' ? `[job] ${h.id} ${h.status} — ${h.title}` : `[msg #${h.seq}] ${h.from} → ${h.to} (${fmtTime(h.ts)}): …${h.snippet}…`).join('\n') : 'No results.');
     }));
 

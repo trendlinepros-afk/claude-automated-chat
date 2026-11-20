@@ -16,7 +16,8 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 const BROADCAST = 'all';
-const NAME_RE = /^[A-Za-z0-9_.-]{1,40}$/;
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
+const NOTE_EXT = /\.(md|markdown|txt|json|csv|ya?ml|log|html?|xml|canvas)$/i;
 const JOB_STATUSES = ['open', 'claimed', 'in_progress', 'blocked', 'done', 'failed', 'cancelled'];
 const MSG_END = '<!-- /msg -->';
 const ATT_MARK = '<!-- attachments -->';
@@ -26,12 +27,16 @@ function dayOf(ts) { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.
 function timeOf(ts) { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
 function newId(prefix) { return `${prefix}${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`; }
 function safeFileName(name) {
-  const base = path.basename(String(name || 'file')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+  const base = path.basename(String(name || 'file').replace(/\\/g, '/'))
+    .replace(/[<>:"/\\|?*\x00-\x1f\u202e]/g, '_').replace(/[. ]+$/, '').trim();
   return (base || 'file').slice(0, 120);
 }
 function escapeBody(text) {
-  return String(text || '').split(MSG_END).join('<!-- /msg​ -->').split(ATT_MARK).join('<!-- attachments​ -->');
+  return String(text || '').split(MSG_END).join('<!-- /msg\u200b -->').split(ATT_MARK).join('<!-- attachments\u200b -->')
+    .split('<!-- msg ').join('<!--\u200b msg ').split('<!-- job ').join('<!--\u200b job ');
 }
+/** JSON safe to embed inside an HTML comment (no "-->" sequences). */
+function commentJson(obj) { return JSON.stringify(obj).replace(/-->/g, '--\\u003e').replace(/<!--/g, '\\u003c!--'); }
 function channelFor(a, b) {
   if (b === BROADCAST || a === BROADCAST) return BROADCAST;
   return [a, b].sort((x, y) => x.toLowerCase().localeCompare(y.toLowerCase())).join('+');
@@ -198,6 +203,21 @@ class VaultStore extends EventEmitter {
     return meta;
   }
 
+  /** Can this agent see the attachment? (sender, recipient, broadcast, job participant, or uploader) */
+  canSeeAttachment(agent, id) {
+    if (agent === this.operatorName) return true;
+    const meta = this.attachments.get(id);
+    if (!meta) return false;
+    if (meta.from === agent) return true;
+    for (const m of this.messages) {
+      if ((m.from === agent || this.isFor(m, agent)) && m.attachments.some(a => a.id === id)) return true;
+    }
+    for (const j of this.jobs.values()) {
+      if ((j.from === agent || j.to === agent || j.to === BROADCAST || j.claimedBy === agent) && j.attachments.some(a => a.id === id)) return true;
+    }
+    return false;
+  }
+
   getAttachment(id) {
     const meta = this.attachments.get(id);
     if (!meta) return null;
@@ -214,6 +234,8 @@ class VaultStore extends EventEmitter {
     const from = o.from;
     const to = o.to === BROADCAST ? BROADCAST : o.to;
     if (!from || !to) throw new Error('from and to are required');
+    if (!this.validName(from)) throw new Error(`Invalid sender name "${from}"`);
+    if (to !== BROADCAST && !this.validName(to)) throw new Error(`Invalid recipient name "${to}"`);
     const ts = Date.now();
     const seq = ++this.state.seq;
     const msg = {
@@ -250,7 +272,7 @@ class VaultStore extends EventEmitter {
     if (msg.replyTo) meta.replyTo = msg.replyTo;
     if (msg.attachments.length) meta.attachments = msg.attachments;
     const label = msg.kind === 'job' ? ' 🧰' : msg.kind === 'system' ? ' ⚙️' : '';
-    out += `<!-- msg ${JSON.stringify(meta)} -->\n`;
+    out += `<!-- msg ${commentJson(meta)} -->\n`;
     out += `**${msg.from}** → **${msg.to}** · ${timeOf(msg.ts)}${label}\n\n`;
     out += escapeBody(msg.text) + '\n';
     if (msg.attachments.length) {
@@ -355,7 +377,7 @@ class VaultStore extends EventEmitter {
     }
     body += '\n## Activity\n\n' + job.log.map(l => `- ${new Date(l.ts).toISOString()} — **${l.by}**: ${l.status ? `[${l.status}] ` : ''}${String(l.note || '').replace(/\n/g, ' ')}`).join('\n') + '\n';
     if (job.result) body += `\n## Result\n\n${escapeBody(job.result)}\n`;
-    body += `\n<!-- job ${JSON.stringify(persisted).replace(/-->/g, '--\\u003e')} -->\n`;
+    body += `\n<!-- job ${commentJson(persisted)} -->\n`;
     fs.writeFileSync(path.join(this.jobsDir, job.file), body);
   }
 
@@ -423,6 +445,8 @@ class VaultStore extends EventEmitter {
     let r = String(rel || '').replace(/\\/g, '/').replace(/^\/+/, '');
     if (!r) throw new Error('path is required');
     if (!/\.[a-z0-9]+$/i.test(r)) r += '.md';
+    if (!NOTE_EXT.test(r)) throw new Error('Notes must be text files (.md, .txt, .json, .csv, .yaml, …)');
+    if (r.split('/').some(seg => seg.startsWith('.'))) throw new Error('Hidden files/folders are not allowed in Notes');
     const abs = path.resolve(this.notesDir, r);
     if (!abs.startsWith(path.resolve(this.notesDir) + path.sep)) throw new Error('Path escapes the Notes folder');
     return { abs, rel: path.relative(this.notesDir, abs).replace(/\\/g, '/') };
@@ -449,7 +473,7 @@ class VaultStore extends EventEmitter {
     walk(base);
     return out.sort((a, b) => a.path.localeCompare(b.path));
   }
-  searchVault(query, limit = 30) {
+  searchVault(query, limit = 30, agent = null) {
     const q = String(query || '').toLowerCase();
     if (!q) return [];
     const hits = [];
@@ -465,6 +489,7 @@ class VaultStore extends EventEmitter {
     }
     for (let i = this.messages.length - 1; i >= 0 && hits.length < limit; i--) {
       const m = this.messages[i];
+      if (agent && agent !== this.operatorName && m.from !== agent && !this.isFor(m, agent)) continue;
       const k = m.text.toLowerCase().indexOf(q);
       if (k >= 0) hits.push({ type: 'message', seq: m.seq, from: m.from, to: m.to, ts: m.ts, snippet: m.text.slice(Math.max(0, k - 80), k + 160) });
     }
@@ -539,4 +564,4 @@ class VaultStore extends EventEmitter {
   }
 }
 
-module.exports = { VaultStore, BROADCAST, JOB_STATUSES, channelFor, guessMime, isTextMime, safeFileName, dayOf };
+module.exports = { VaultStore, BROADCAST, JOB_STATUSES, NAME_RE, channelFor, guessMime, isTextMime, safeFileName, dayOf };

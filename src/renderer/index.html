@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
   <title>Agent Relay</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -26,7 +26,14 @@
       <div id="conversations"></div>
       <div class="section-title">Agent ↔ Agent</div>
       <div id="agent-channels"></div>
-      <div class="sidebar-footer"><span id="version"></span></div>
+      <div class="sidebar-footer">
+        <span id="version"></span>
+        <div class="theme-toggle" role="radiogroup" aria-label="Theme">
+          <button data-theme-set="system" title="Match Windows" aria-label="System theme">🖥</button>
+          <button data-theme-set="light" title="Light" aria-label="Light theme">☀️</button>
+          <button data-theme-set="dark" title="Dark" aria-label="Dark theme">🌙</button>
+        </div>
+      </div>
     </aside>
 
     <main id="main">
@@ -79,6 +86,7 @@
       <!-- CONNECT -->
       <section id="view-connect" class="view scroll">
         <header class="page-header"><h1>Connect agents</h1></header>
+        <div id="nokey-banner" class="banner hidden">⚠️ The access key is turned off — anyone on your network can connect as an agent. Turn on <b>Require access key</b> in Settings.</div>
         <div class="card">
           <h2>Server</h2>
           <div id="conn-status"></div>
@@ -89,7 +97,7 @@
         <div class="card">
           <h2>Add a Claude Desktop computer</h2>
           <p class="muted">On each development PC: install <a href="https://nodejs.org" target="_blank">Node.js LTS</a>, then open Claude Desktop → Settings → Developer → Edit Config and merge the snippet below into <code>claude_desktop_config.json</code>. Restart Claude Desktop.</p>
-          <div class="row"><label>Agent name for that PC</label><input id="conn-agent" value="DevPC-1"></div>
+          <div class="row"><label>Agent name for that PC</label><input id="conn-agent" value="DevPC-1" maxlength="40"></div>
           <div class="row"><label>Server address</label><select id="conn-ip"></select></div>
           <pre id="conn-snippet" class="code"></pre>
           <button id="btn-copy-snippet" class="primary small">Copy config</button>
@@ -110,19 +118,23 @@
       <section id="view-settings" class="view scroll">
         <header class="page-header"><h1>Settings</h1></header>
         <div class="card">
+          <h2>Appearance</h2>
+          <div class="row"><label>Theme</label><select id="theme-select"><option value="system">Match Windows</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
+        </div>
+        <div class="card">
           <h2>Updates</h2>
           <div class="row"><label>Installed version</label><div id="upd-version" class="mono"></div></div>
-          <div class="row"><label>Status</label><div id="upd-status"></div></div>
+          <div class="row"><label>Status</label><div id="upd-status" class="status-line"></div></div>
           <div class="row"><label></label><div><button id="btn-check-updates" class="primary small">Check for updates</button> <button id="btn-install-update" class="ghost small hidden">Restart &amp; install now</button></div></div>
           <div class="row"><label>Automatic updates</label><label class="toggle"><input type="checkbox" data-setting="autoUpdate"> Check on launch and every 4 hours</label></div>
           <div class="row"><label>Auto-install</label><label class="toggle"><input type="checkbox" data-setting="autoInstallUpdates"> Install and restart as soon as an update is downloaded</label></div>
         </div>
         <div class="card">
           <h2>Server</h2>
-          <div class="row"><label>Port</label><input type="number" data-setting="port"></div>
+          <div class="row"><label>Port</label><input type="number" min="1" max="65535" data-setting="port" class="narrow"></div>
           <div class="row"><label>Bind address</label><input data-setting="host"></div>
           <div class="row"><label>Require access key</label><label class="toggle"><input type="checkbox" data-setting="requireKey"> Recommended</label></div>
-          <div class="row"><label>Your name in chat</label><input data-setting="operatorName"></div>
+          <div class="row"><label>Your name in chat</label><input data-setting="operatorName" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*"></div>
         </div>
         <div class="card">
           <h2>Vault</h2>
@@ -131,12 +143,12 @@
         </div>
         <div class="card">
           <h2>History cleanup</h2>
-          <div class="row"><label>Keep chat history for</label><div class="inline"><input type="number" data-setting="retentionDays" class="narrow"> days <span class="muted">(0 = forever)</span></div></div>
-          <div class="row"><label>Run cleanup every</label><div class="inline"><input type="number" step="0.25" data-setting="pruneIntervalHours" class="narrow"> hours</div></div>
-          <div class="row"><label>Prune when system RAM ≥</label><div class="inline"><input type="number" data-setting="memoryThresholdPercent" class="narrow"> % <span class="muted">(0 = off)</span></div></div>
-          <div class="row"><label>Prune when app memory ≥</label><div class="inline"><input type="number" data-setting="maxProcessMemoryMB" class="narrow"> MB</div></div>
-          <div class="row"><label>Max messages kept loaded</label><input type="number" data-setting="maxMessagesInMemory"></div>
-          <div class="row"><label>Always keep the last</label><div class="inline"><input type="number" data-setting="memoryPruneKeepDays" class="narrow"> day(s) during memory pruning</div></div>
+          <div class="row"><label>Keep chat history for</label><div class="inline"><input type="number" min="0" max="3650" data-setting="retentionDays" class="narrow"> days <span class="muted">(0 = forever)</span></div></div>
+          <div class="row"><label>Run cleanup every</label><div class="inline"><input type="number" step="0.25" min="0.25" max="168" data-setting="pruneIntervalHours" class="narrow"> hours</div></div>
+          <div class="row"><label>Prune when system RAM ≥</label><div class="inline"><input type="number" min="0" max="99" data-setting="memoryThresholdPercent" class="narrow"> % <span class="muted">(0 = off)</span></div></div>
+          <div class="row"><label>Prune when app memory ≥</label><div class="inline"><input type="number" min="0" data-setting="maxProcessMemoryMB" class="narrow"> MB</div></div>
+          <div class="row"><label>Max messages kept loaded</label><input type="number" min="0" data-setting="maxMessagesInMemory"></div>
+          <div class="row"><label>Always keep the last</label><div class="inline"><input type="number" min="1" max="365" data-setting="memoryPruneKeepDays" class="narrow"> day(s) during memory pruning</div></div>
           <div class="row"><label>Current usage</label><div id="mem-status" class="mono"></div></div>
           <div class="row"><label></label><div><button id="btn-prune" class="ghost small">Run cleanup now</button> <button id="btn-clear" class="danger small">Delete all chat history</button></div></div>
           <div id="retention-log" class="muted small-text"></div>
@@ -146,10 +158,10 @@
           <p class="muted">Back up the vault (chats, jobs, notes, attachments) and settings to a network share, e.g. <code>\\NAS\Backups\AgentRelay</code>. Restoring moves your current data aside first, so you can undo.</p>
           <div class="row"><label>Backup folder / network share</label><div class="inline"><input data-setting="backupPath" class="wide" placeholder="\\server\share\AgentRelay"><button id="btn-pick-backup" class="ghost small">Browse…</button></div></div>
           <div class="row"><label>Share username (optional)</label><input data-setting="backupUser" placeholder="DOMAIN\user (empty = your Windows login)"></div>
-          <div class="row"><label>Share password</label><div class="inline"><input id="backup-password" type="password" placeholder="(unchanged)"><button id="btn-set-backup-pw" class="ghost small">Save credentials</button><span id="backup-pw-status" class="muted"></span></div></div>
-          <div class="row"><label>Automatic backup every</label><div class="inline"><input type="number" step="1" data-setting="backupIntervalHours" class="narrow"> hours <span class="muted">(0 = manual only)</span></div></div>
-          <div class="row"><label>Keep the newest</label><div class="inline"><input type="number" data-setting="backupKeep" class="narrow"> backups</div></div>
-          <div class="row"><label>Status</label><div id="backup-status"></div></div>
+          <div class="row"><label>Share password</label><div class="inline"><input id="backup-password" type="password" autocomplete="new-password" placeholder="(unchanged)"><button id="btn-set-backup-pw" class="ghost small">Save credentials</button><span id="backup-pw-status" class="muted"></span></div></div>
+          <div class="row"><label>Automatic backup every</label><div class="inline"><input type="number" step="1" min="0" max="8760" data-setting="backupIntervalHours" class="narrow"> hours <span class="muted">(0 = manual only)</span></div></div>
+          <div class="row"><label>Keep the newest</label><div class="inline"><input type="number" min="1" max="1000" data-setting="backupKeep" class="narrow"> backups</div></div>
+          <div class="row"><label>Status</label><div id="backup-status" class="status-line"></div></div>
           <div class="row"><label></label><div><button id="btn-backup-now" class="primary small">Back up now</button> <button id="btn-list-backups" class="ghost small">Show backups</button> <button id="btn-restore-folder" class="ghost small">Restore from folder…</button> <label class="toggle"><input type="checkbox" id="restore-settings"> also restore settings</label></div></div>
           <div id="backup-list"></div>
         </div>

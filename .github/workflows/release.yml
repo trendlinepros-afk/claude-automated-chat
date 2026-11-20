@@ -31,6 +31,13 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Create a password-protected SMB share
+        shell: pwsh
+        run: ./scripts/ci-smb-share.ps1
+
+      - name: Backup & restore over the real network share
+        run: node test/smb-backup.js
+
       - name: Set version (major.minor from package.json, patch = run number)
         id: ver
         shell: bash

@@ -1,0 +1,29 @@
+name: CI
+
+# Runs on every branch except main (main runs the full release workflow, which includes the same tests).
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Unit / end-to-end tests
+        run: npm test
+      - name: Create a password-protected SMB share
+        shell: pwsh
+        run: ./scripts/ci-smb-share.ps1
+      - name: Backup & restore over the real network share
+        run: node test/smb-backup.js

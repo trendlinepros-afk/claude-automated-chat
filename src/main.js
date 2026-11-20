@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard, safeStorage, nativeTheme, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const log = require('electron-log/main');
@@ -8,7 +8,7 @@ const { RelayServer } = require('./mcpServer');
 const { Retention } = require('./retention');
 const { Settings } = require('./settings');
 const { Updater } = require('./updater');
-const { BackupManager, uncRoot } = require('./backup');
+const { BackupManager, uncRoot, netUse } = require('./backup');
 
 log.initialize();
 log.transports.file.maxSize = 5 * 1024 * 1024;
@@ -30,17 +30,33 @@ function createWindow() {
     width: 1280, height: 820, minWidth: 900, minHeight: 600,
     title: `Agent Relay ${app.getVersion()}`,
     icon: ICON,
-    backgroundColor: '#0f1115',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f4f5f8',
     show: !s.startMinimized,
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  // Only ever open real web links externally; never navigate the app window anywhere else.
+  win.webContents.setWindowOpenHandler(({ url }) => { openExternalSafe(url); return { action: 'deny' }; });
+  win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file://')) { e.preventDefault(); openExternalSafe(url); } });
+  win.webContents.on('will-attach-webview', (e) => e.preventDefault());
   win.on('close', (e) => {
     if (!app.isQuitting && settings.get().closeToTray) { e.preventDefault(); win.hide(); }
   });
 }
+
+function openExternalSafe(url) {
+  try { const u = new URL(url); if (u.protocol === 'https:' || u.protocol === 'http:') shell.openExternal(u.href); } catch { /* ignore */ }
+}
+
+function applyTheme() {
+  const t = settings.get().theme;
+  nativeTheme.themeSource = ['light', 'dark'].includes(t) ? t : 'system';
+}
+
+// Files that are safe to open directly with their default app. Anything else (exe, bat, ps1, js, lnk, msi, …)
+// is only revealed in Explorer so a malicious attachment can never run with one click.
+const SAFE_OPEN_EXT = /\.(png|jpe?g|gif|webp|bmp|txt|md|markdown|log|csv|json|ya?ml|xml|pdf|docx?|xlsx?|pptx?|mp4|mp3|wav|zip)$/i;
 
 function showWindow() { if (!win) createWindow(); win.show(); if (win.isMinimized()) win.restore(); win.focus(); }
 
@@ -111,19 +127,16 @@ async function restartServices() {
 }
 
 /** Connect to a network share with stored credentials (Windows `net use`). */
-function connectShare(target) {
+async function connectShare(target) {
   const s = settings.get();
   const root = uncRoot(target);
-  if (process.platform !== 'win32' || !root || !s.backupUser) return Promise.resolve();
+  if (process.platform !== 'win32' || !root || !s.backupUser) return { ok: true };
   let pass = '';
-  try { if (s.backupPasswordEnc) pass = safeStorage.decryptString(Buffer.from(s.backupPasswordEnc, 'base64')); } catch (e) { log.error('[backup] cannot decrypt password: ' + e.message); }
-  const { execFile } = require('child_process');
-  return new Promise(resolve => {
-    execFile('net', ['use', root, pass, `/user:${s.backupUser}`, '/persistent:no'], { windowsHide: true, timeout: 30000 }, (err, _out, errOut) => {
-      if (err && !/1219|already/i.test(String(errOut))) log.warn('[backup] net use: ' + String(errOut || err.message).trim());
-      resolve();
-    });
-  });
+  try { if (s.backupPasswordEnc) pass = safeStorage.decryptString(Buffer.from(s.backupPasswordEnc, 'base64')); }
+  catch (e) { log.error('[backup] cannot decrypt share password: ' + e.message); return { ok: false, message: 'stored password could not be decrypted — re-enter it' }; }
+  const r = await netUse(root, s.backupUser, pass);
+  if (!r.ok) log.warn('[backup] net use failed: ' + r.message);
+  return r;
 }
 
 function initBackup() {
@@ -164,7 +177,12 @@ function registerIpc() {
   ipcMain.handle('relay:channel', (_e, channel, opts) => store.channelHistory(channel, opts || {}));
   ipcMain.handle('relay:send', (_e, { to, text, files, asJob, title, priority }) => {
     const op = settings.get().operatorName;
-    const atts = (files || []).map(f => store.saveAttachment(f.name, Buffer.from(f.data, 'base64'), f.mime, op));
+    if (to !== BROADCAST && !store.validName(to)) throw new Error('Invalid recipient');
+    text = String(text || '');
+    if (!Array.isArray(files)) files = [];
+    if (files.length > 20) throw new Error('At most 20 files per message');
+    if (!['low', 'normal', 'high', 'urgent'].includes(priority)) priority = 'normal';
+    const atts = files.map(f => store.saveAttachment(String(f.name || 'file'), Buffer.from(String(f.data || ''), 'base64'), /^[\w.+-]+\/[\w.+-]+$/.test(f.mime || '') ? f.mime : undefined, op));
     if (asJob) return store.createJob({ from: op, to, title: title || text.split('\n')[0].slice(0, 80), description: text, priority, attachments: atts });
     const m = store.postMessage({ from: op, to, text, attachments: atts });
     if (to !== BROADCAST) store.markRead(op);
@@ -175,8 +193,12 @@ function registerIpc() {
   ipcMain.handle('relay:deleteJob', (_e, id) => store.deleteJob(id));
   ipcMain.handle('relay:channelFor', (_e, a, b) => channelFor(a, b));
   ipcMain.handle('relay:saveSettings', async (_e, patch) => {
+    patch = Object.assign({}, patch);
+    for (const k of ['accessKey', 'backupPasswordEnc', 'lastBackupAt']) delete patch[k]; // managed elsewhere
+    if ('operatorName' in patch && !store.validName(patch.operatorName)) throw new Error('Your name must start with a letter/digit and use only letters, digits, _ . - (max 40)');
     const before = settings.get();
     const after = settings.update(patch);
+    applyTheme();
     applyLoginItem();
     const needsRestart = ['port', 'host', 'vaultPath', 'operatorName'].some(k => before[k] !== after[k]);
     if (needsRestart) await restartServices();
@@ -214,7 +236,7 @@ function registerIpc() {
     try { const res = await backup.restore(dir, { restoreSettings }); applyLoginItem(); return { ok: true, message: res.message }; } catch (e) { return { ok: false, message: e.message }; }
   });
   ipcMain.handle('relay:regenKey', async () => {
-    settings.update({ accessKey: require('crypto').randomBytes(12).toString('hex') });
+    settings.update({ accessKey: require('crypto').randomBytes(16).toString('hex') });
     return snapshot();
   });
   ipcMain.handle('relay:pickVault', async () => {
@@ -223,7 +245,17 @@ function registerIpc() {
   });
   ipcMain.handle('relay:openVault', () => shell.openPath(settings.get().vaultPath));
   ipcMain.handle('relay:openLogs', () => shell.showItemInFolder(log.transports.file.getFile().path));
-  ipcMain.handle('relay:openAttachment', (_e, id) => { const a = store.getAttachment(id); if (a) shell.openPath(a.abs); });
+  ipcMain.handle('relay:openAttachment', (_e, id) => {
+    const a = store.getAttachment(String(id));
+    if (!a) return false;
+    if (SAFE_OPEN_EXT.test(a.abs)) shell.openPath(a.abs); else shell.showItemInFolder(a.abs);
+    return true;
+  });
+  ipcMain.handle('relay:setTheme', (_e, theme) => {
+    settings.update({ theme: ['light', 'dark', 'system'].includes(theme) ? theme : 'system' });
+    applyTheme();
+    return settings.get().theme;
+  });
   ipcMain.handle('relay:attachmentData', (_e, id) => {
     const a = store.getAttachment(id);
     if (!a || a.meta.size > 15 * 1024 * 1024) return null;
@@ -253,6 +285,9 @@ app.on('second-instance', showWindow);
 app.whenReady().then(async () => {
   settings = new Settings(path.join(app.getPath('userData'), 'settings.json'), path.join(app.getPath('documents'), 'Agent Relay Vault'));
   updater = new Updater(() => settings.get(), log, (st) => send('relay:update', st), () => { app.isQuitting = true; });
+  applyTheme();
+  // The UI never needs camera, mic, notifications-permission prompts, geolocation, etc.
+  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   registerIpc();
   await startServices();
   initBackup();

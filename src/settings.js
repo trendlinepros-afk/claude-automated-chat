@@ -22,6 +22,7 @@ const DEFAULTS = {
   startMinimized: false,
   closeToTray: true,
   notifications: true,
+  theme: 'system',         // system | light | dark
   backupPath: '',           // e.g. \\\\NAS\\Backups\\AgentRelay
   backupUser: '',           // optional share credentials (DOMAIN\\user)
   backupPasswordEnc: '',    // encrypted with Windows DPAPI (safeStorage)
@@ -36,20 +37,32 @@ class Settings {
     this.data = Object.assign({}, DEFAULTS);
     try { Object.assign(this.data, JSON.parse(fs.readFileSync(file, 'utf8'))); } catch { /* first run */ }
     let changed = false;
-    if (!this.data.accessKey) { this.data.accessKey = crypto.randomBytes(12).toString('hex'); changed = true; }
+    if (!this.data.accessKey) { this.data.accessKey = crypto.randomBytes(16).toString('hex'); changed = true; }
     if (!this.data.vaultPath) { this.data.vaultPath = defaultVault; changed = true; }
     if (changed) this.save();
   }
   get() { return Object.assign({}, this.data); }
   update(patch) {
     for (const k of Object.keys(patch || {})) if (k in DEFAULTS) this.data[k] = patch[k];
+    const num = (k, min, max) => {
+      const v = Number(this.data[k]);
+      this.data[k] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULTS[k];
+    };
     this.data.port = Math.min(65535, Math.max(1, parseInt(this.data.port, 10) || DEFAULTS.port));
+    num('retentionDays', 0, 3650); num('pruneIntervalHours', 0.25, 168); num('memoryThresholdPercent', 0, 99);
+    num('maxProcessMemoryMB', 0, 65536); num('maxMessagesInMemory', 0, 10000000); num('memoryPruneKeepDays', 1, 365);
+    num('backupIntervalHours', 0, 8760); num('backupKeep', 1, 1000);
+    for (const k of ['requireKey', 'autoUpdate', 'autoInstallUpdates', 'launchAtStartup', 'startMinimized', 'closeToTray', 'notifications']) this.data[k] = !!this.data[k];
+    if (!['system', 'light', 'dark'].includes(this.data.theme)) this.data.theme = 'system';
+    this.data.host = String(this.data.host || '0.0.0.0').trim() || '0.0.0.0';
     this.save();
     return this.get();
   }
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2));
+    const tmp = this.file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
   }
 }
 

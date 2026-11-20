@@ -17,7 +17,10 @@ function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-dig
 function fmtDay(ts) { return new Date(ts).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); }
 function ago(ts) { if (!ts) return 'never'; const s = (Date.now() - ts) / 1000; if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago'; }
 function kb(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB'; }
-function colorFor(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return `hsl(${h} 55% 45%)`; }
+const AVATAR_COLORS = ['#6d5efc', '#0ea5e9', '#16a34a', '#f97316', '#db2777', '#0d9488', '#ca8a04', '#9333ea', '#dc2626', '#2563eb'];
+function colorFor(name) { let h = 2166136261; for (const c of String(name)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return AVATAR_COLORS[(h >>> 0) % AVATAR_COLORS.length]; }
+const STATUS_LABEL = { open: 'Open', claimed: 'Claimed', in_progress: 'In progress', blocked: 'Blocked', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+function statusPill(st) { return `<span class="status ${esc(st)}">${esc(STATUS_LABEL[st] || st)}</span>`; }
 function initials(n) { return String(n).replace(/[^A-Za-z0-9]/g, ' ').trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase() || '?'; }
 function toast(msg, ms = 2500) { const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add('hidden'), ms); }
 function lastRead(ch) { try { return Number(localStorage.getItem('read:' + ch) || 0); } catch { return 0; } }
@@ -28,7 +31,8 @@ function md(text) {
   const parts = String(text || '').split(/```/);
   return parts.map((p, i) => {
     if (i % 2) { const nl = p.indexOf('\n'); const body = nl >= 0 && /^[\w+-]*$/.test(p.slice(0, nl)) ? p.slice(nl + 1) : p; return `<pre><code>${esc(body.replace(/\n$/, ''))}</code></pre>`; }
-    let h = esc(p);
+    let h = esc(p.replace(/^\n+|\n+$/g, ''));
+    if (!h) return '';
     h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
       .replace(/(^|\s)_([^_\n]+)_(?=\s|$)/g, '$1<i>$2</i>')
@@ -37,6 +41,19 @@ function md(text) {
     return h.split(/\n{2,}/).map(par => `<p>${par.replace(/\n/g, '<br>')}</p>`).join('');
   }).join('');
 }
+
+// ---------- theme ----------
+function applyThemeAttr(theme) {
+  const t = ['light', 'dark'].includes(theme) ? theme : 'system';
+  document.documentElement.dataset.theme = t;
+  $$('[data-theme-set]').forEach(b => { b.classList.toggle('active', b.dataset.themeSet === t); b.setAttribute('aria-checked', String(b.dataset.themeSet === t)); });
+  const sel = $('#theme-select'); if (sel) sel.value = t;
+  try { localStorage.setItem('theme', t); } catch { /* ignore */ }
+}
+async function setTheme(t) { applyThemeAttr(t); const saved = await relay.setTheme(t); if (snap) snap.settings.theme = saved; }
+try { applyThemeAttr(localStorage.getItem('theme') || 'system'); } catch { applyThemeAttr('system'); } // avoid a flash before the snapshot loads
+$$('[data-theme-set]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeSet)));
+$('#theme-select').addEventListener('change', e => setTheme(e.target.value));
 
 // ---------- navigation ----------
 function showView(v) {
@@ -94,11 +111,15 @@ async function openChannel(ch) {
   const to = recipientFor(ch);
   const agent = snap.agents.find(a => a.name === to);
   $('#chat-title').textContent = ch === BROADCAST ? 'Broadcast (everyone)' : to ? to : ch.replace('+', ' ↔ ');
-  $('#chat-sub').textContent = ch === BROADCAST ? 'Every connected agent receives these messages'
-    : agent ? `${agent.online ? '● online' : '○ offline'} · last seen ${ago(agent.lastSeen)}${agent.description ? ' · ' + agent.description : ''}`
+  const onlineCount = snap.agents.filter(x => x.online && !x.human).length;
+  $('#chat-sub').innerHTML = ch === BROADCAST ? `Every agent receives these messages · ${onlineCount} online`
+    : agent ? `<span class="dot ${agent.online ? 'on' : ''}"></span> ${agent.online ? 'online' : 'offline'} · last seen ${ago(agent.lastSeen)}${agent.description ? ' · ' + esc(agent.description) : ''}`
       : 'Read-only view of a conversation between two agents';
   $('#composer').classList.toggle('hidden', !to);
-  const msgs = await relay.channel(ch, { limit: 300 });
+  $('#input').placeholder = to === BROADCAST ? 'Message every agent…' : `Message ${to}…`;
+  $('#input').title = 'Enter to send · Shift+Enter for a new line · paste or drop images and files';
+  const msgs = await relay.channel(ch, { limit: PAGE });
+  if (ch !== current) return; // user switched while loading
   renderMessages(msgs);
   const sum = channelSummary(ch);
   if (sum) setLastRead(ch, sum.lastSeq);
@@ -107,6 +128,7 @@ async function openChannel(ch) {
   $('#input').focus();
 }
 
+const PAGE = 200;
 function messageHtml(m) {
   const mine = m.from === op();
   const atts = (m.attachments || []).map(a => /^image\//.test(a.mime)
@@ -114,17 +136,32 @@ function messageHtml(m) {
     : `<span class="file-chip" data-open="${esc(a.id)}">📄 ${esc(a.name)} <span class="muted">${kb(a.size)}</span></span>`).join('');
   return `<div class="msg ${mine ? 'mine' : ''} ${m.kind === 'job' ? 'job' : ''}" data-seq="${m.seq}">
     <div class="who"><b>${esc(m.from)}</b> → ${esc(m.to)} · ${fmtTime(m.ts)}</div>
-    <div class="bubble">${md(m.text)}${atts ? `<div class="atts">${atts}</div>` : ''}</div></div>`;
+    <div class="bubble">${md(m.text)}${atts ? `<div class="atts">${atts}</div>` : ''}${m.jobId ? `<button class="job-link" data-jobopen="${esc(m.jobId)}">Open job →</button>` : ''}</div></div>`;
 }
 
 let lastDay = null;
-function renderMessages(msgs) {
+let currentMsgs = [];
+function renderMessages(msgs, hasMore, keepScroll) {
   const box = $('#messages');
   lastDay = null;
-  if (!msgs.length) { box.innerHTML = '<div class="empty">No messages yet.<br>Say hello 👋</div>'; return; }
-  box.innerHTML = msgs.map(m => daySep(m) + messageHtml(m)).join('');
+  currentMsgs = msgs;
+  if (!msgs.length) {
+    box.innerHTML = recipientFor(current) ? '<div class="empty">No messages yet.<br>Say hello 👋</div>' : '<div class="empty">No messages in this conversation.</div>';
+    return;
+  }
+  if (hasMore === undefined) hasMore = msgs.length >= PAGE;
+  box.innerHTML = (hasMore ? '<button class="ghost small load-older">Load older messages</button>' : '')
+    + msgs.map(m => daySep(m) + messageHtml(m)).join('');
   hydrate(box);
-  box.scrollTop = box.scrollHeight;
+  if (keepScroll) box.scrollTop = box.scrollHeight - keepScroll; else box.scrollTop = box.scrollHeight;
+}
+async function loadOlder(btn) {
+  btn.disabled = true;
+  const ch = current;
+  const older = await relay.channel(ch, { limit: PAGE, beforeSeq: currentMsgs[0].seq });
+  if (ch !== current) return;
+  const box = $('#messages');
+  renderMessages(older.concat(currentMsgs), older.length >= PAGE, box.scrollHeight - box.scrollTop);
 }
 function daySep(m) { const d = new Date(m.ts).toDateString(); if (d === lastDay) return ''; lastDay = d; return `<div class="day-sep">${fmtDay(m.ts)}</div>`; }
 
@@ -132,6 +169,7 @@ function appendMessage(m) {
   const box = $('#messages');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 200;
   const empty = box.querySelector('.empty'); if (empty) empty.remove();
+  currentMsgs.push(m);
   box.insertAdjacentHTML('beforeend', daySep(m) + messageHtml(m));
   hydrate(box);
   if (nearBottom || m.from === op()) box.scrollTop = box.scrollHeight;
@@ -147,8 +185,15 @@ function hydrate(root) {
     img.onclick = () => { $('#lightbox-img').src = img.src; $('#lightbox').classList.remove('hidden'); };
   });
   root.querySelectorAll('[data-open]').forEach(el => { el.onclick = () => relay.openAttachment(el.dataset.open); });
+  root.querySelectorAll('[data-jobopen]').forEach(el => { el.onclick = () => { showView('jobs'); openJob(el.dataset.jobopen); }; });
+  root.querySelectorAll('.load-older').forEach(el => { el.onclick = () => loadOlder(el); });
 }
 $('#lightbox').addEventListener('click', () => $('#lightbox').classList.add('hidden'));
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#lightbox').classList.contains('hidden')) { $('#lightbox').classList.add('hidden'); return; }
+  if (!$('#job-detail').classList.contains('hidden')) { $('#job-detail').classList.add('hidden'); openJobId = null; renderJobs(); }
+});
 
 // composer
 const input = $('#input');
@@ -216,8 +261,8 @@ function renderJobs() {
     return `<div class="column"><h3>${c.title}<span class="muted">${list.length}</span></h3><div class="cards">${list.map(j => `
       <div class="job-card" data-job="${esc(j.id)}">
         <div class="t">${esc(j.title)}${j.priority !== 'normal' ? `<span class="prio ${esc(j.priority)}">${esc(j.priority)}</span>` : ''}</div>
-        <div class="m">${esc(j.from)} → ${esc(j.claimedBy || j.to)} · <span class="status ${esc(j.status)}">${esc(j.status)}</span></div>
-        <div class="m">updated ${ago(j.updated)}</div>
+        <div class="m">${esc(j.from)} → ${esc(j.claimedBy || j.to)}</div>
+        <div class="m meta-row">${statusPill(j.status)}<span>updated ${ago(j.updated)}</span></div>
       </div>`).join('') || '<div class="muted small-text">Nothing here</div>'}</div></div>`;
   }).join('');
   $$('.job-card').forEach(el => el.addEventListener('click', () => openJob(el.dataset.job)));
@@ -229,15 +274,19 @@ function openJob(id) {
   const d = $('#job-detail');
   if (!j) { d.classList.add('hidden'); openJobId = null; return; }
   openJobId = id;
-  d.innerHTML = `<button class="ghost small" id="jd-close" style="float:right">✕</button>
+  $$('.job-card').forEach(c => c.classList.toggle('selected', c.dataset.job === id));
+  d.innerHTML = `<button class="ghost small close" id="jd-close" aria-label="Close">✕</button>
     <h2>${esc(j.title)}</h2>
-    <div class="muted">${esc(j.id)} · ${esc(j.from)} → ${esc(j.to)}${j.claimedBy ? ` (claimed by ${esc(j.claimedBy)})` : ''} · <span class="status ${esc(j.status)}">${esc(j.status)}</span> <span class="prio ${esc(j.priority)}">${esc(j.priority)}</span></div>
+    <div class="muted">${esc(j.id)} · ${esc(j.from)} → ${esc(j.to)}${j.claimedBy ? ` (claimed by ${esc(j.claimedBy)})` : ''}</div>
+    <div class="meta-row" style="margin-top:6px">${statusPill(j.status)}<span class="prio ${esc(j.priority)}">${esc(j.priority)}</span><span class="muted small-text">created ${new Date(j.created).toLocaleString()}</span></div>
     <h3>Description</h3><div class="desc">${esc(j.description)}</div>
     ${j.attachments.length ? `<h3>Attachments</h3><div class="atts">${j.attachments.map(a => /^image\//.test(a.mime) ? `<img data-att="${esc(a.id)}" alt="${esc(a.name)}">` : `<span class="file-chip" data-open="${esc(a.id)}">📄 ${esc(a.name)}</span>`).join('')}</div>` : ''}
     ${j.result ? `<h3>Result</h3><div class="desc">${esc(j.result)}</div>` : ''}
+    <h3>Update</h3>
+    <input id="jd-note" placeholder="Add a note for the agent (optional)" style="width:100%">
     <div class="actions">
-      <input id="jd-note" placeholder="Add a note (optional)" style="flex:1;min-width:200px">
-      ${['open', 'in_progress', 'blocked', 'done', 'cancelled'].map(s => `<button class="ghost small" data-st="${s}">${s.replace('_', ' ')}</button>`).join('')}
+      ${[['open', 'Reopen'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['done', 'Mark done ✓'], ['cancelled', 'Cancel job']].map(([st, label]) => `<button class="${st === 'done' ? 'primary' : 'ghost'} small" data-st="${st}" ${j.status === st ? 'disabled' : ''}>${label}</button>`).join('')}
+      <span style="flex:1"></span>
       <button class="danger small" id="jd-del">Delete</button>
     </div>
     <h3>Activity</h3><div class="log">${j.log.slice().reverse().map(l => `<div>${new Date(l.ts).toLocaleString()} — <b>${esc(l.by)}</b>: ${l.status ? `[${esc(l.status)}] ` : ''}${esc(l.note || '')}</div>`).join('')}</div>`;
@@ -250,6 +299,7 @@ function openJob(id) {
 
 // ---------- connect ----------
 function renderConnect() {
+  $('#nokey-banner').classList.toggle('hidden', !!snap.connection.key);
   const c = snap.connection;
   $('#conn-status').innerHTML = c.status.running ? `<span class="dot on"></span> Running on port <b>${c.port}</b> · ${c.sessions} active MCP session(s) · host <b>${esc(c.hostname)}</b>` : `<span class="dot err"></span> ${esc(c.status.error || 'Stopped')}`;
   $('#conn-addresses').innerHTML = c.addresses.map(a => `${esc(a.address)} <span class="muted">(${esc(a.iface)})</span>`).join('<br>') || 'No network interfaces found';
@@ -351,7 +401,9 @@ function renderUpdate(u) {
 $('#btn-save').onclick = async () => {
   const patch = settingsPatch();
   $('#save-status').textContent = 'Saving…';
-  snap = await relay.saveSettings(patch);
+  try { snap = await relay.saveSettings(patch); }
+  catch (e) { $('#save-status').textContent = ''; toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 6000); return; }
+  renderSettings();
   $('#save-status').textContent = 'Saved ✓';
   setTimeout(() => $('#save-status').textContent = '', 2500);
   renderAll();
@@ -366,7 +418,7 @@ $('#btn-clear').onclick = async () => { if (await relay.clearHistory()) { toast(
 
 // ---------- live updates ----------
 function renderAll() { renderServerStatus(); renderSidebar(); }
-async function refresh() { snap = await relay.snapshot(); renderAll(); }
+async function refresh() { snap = await relay.snapshot(); applyThemeAttr(snap.settings.theme); renderAll(); }
 
 relay.onMessage(m => {
   const sums = snap.channels || (snap.channels = []);
