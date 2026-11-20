@@ -49,6 +49,10 @@ jobs:
       - name: Build installer
         run: npx electron-builder --win --x64 --publish never
 
+      - name: Smoke test the packaged app (blocks the release if it fails to start)
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
+
       - name: Publish GitHub release (read by the in-app auto-updater)
         shell: bash
         env:

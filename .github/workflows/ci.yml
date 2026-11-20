@@ -27,3 +27,8 @@ jobs:
         run: ./scripts/ci-smb-share.ps1
       - name: Backup & restore over the real network share
         run: node test/smb-backup.js
+      - name: Build the app (no publish)
+        run: npx electron-builder --win --x64 --publish never
+      - name: Smoke test the packaged app
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
