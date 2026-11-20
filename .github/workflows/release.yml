@@ -46,25 +46,6 @@ jobs:
           echo "Version $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Code signing switches on automatically once these repository secrets exist:
-      #   WIN_CSC_LINK          base64 of your .pfx code-signing certificate
-      #   WIN_CSC_KEY_PASSWORD  its password
-      # When signed, electron-builder records the publisher name and the auto-updater
-      # refuses any future update that is not signed by the same publisher.
-      - name: Enable code signing (only if a certificate is configured)
-        shell: bash
-        env:
-          L: ${{ secrets.WIN_CSC_LINK }}
-          P: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: |
-          if [ -n "$L" ]; then
-            echo "CSC_LINK=$L" >> "$GITHUB_ENV"
-            echo "CSC_KEY_PASSWORD=$P" >> "$GITHUB_ENV"
-            echo "Code signing enabled"
-          else
-            echo "No signing certificate configured - building unsigned"
-          fi
-
       - name: Build installer
         run: npx electron-builder --win --x64 --publish never
 

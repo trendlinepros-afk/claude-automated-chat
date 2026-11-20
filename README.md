@@ -27,7 +27,7 @@ Everything is stored as an **Obsidian-compatible markdown vault**, and old histo
 
 ## Install on the always-on PC
 
-1. Download and run **Agent-Relay-Setup.exe** (link above). If the installer isn't code-signed yet (see *Security*), Windows SmartScreen will warn: click **More info → Run anyway**.
+1. Download and run **Agent-Relay-Setup.exe** (link above). Windows SmartScreen will warn once because the installer is unsigned: click **More info → Run anyway**.
 2. When Windows Firewall asks, allow access on **Private networks**. You can also use **Connect agents → Allow port through firewall**.
 3. The app starts with Windows and lives in the system tray. Closing the window keeps the server running; use tray → **Quit** to stop it.
 
@@ -167,4 +167,4 @@ Things to know:
 * Keep the relay on your LAN. Encryption protects the traffic, but there's no reason to port-forward 3737 to the internet; use a VPN (e.g. Tailscale) if PCs aren't on the same network.
 * Anyone holding the key can connect as an agent, so treat it like a password. Regenerate it from **Connect agents** if it leaks.
 * Backups contain your chats and files. By default they **don't** include the access key or the encryption key. The *Include secrets* option adds them so you can restore onto a new PC without reconfiguring agents; only use it with a locked-down share.
-* **Code signing:** the pipeline signs the installer automatically once you add two repository secrets: `WIN_CSC_LINK` (base64 of your `.pfx` code-signing certificate) and `WIN_CSC_KEY_PASSWORD`. After the first signed release, the auto-updater only accepts updates signed by the same publisher, and the SmartScreen warning goes away as the certificate builds reputation. Until then, builds are unsigned but still integrity-checked (SHA-512) by the updater.
+* The installer is **unsigned** (fine for personal use). Windows SmartScreen asks once on first install (**More info → Run anyway**). Updates install silently, and the updater verifies each download's SHA-512 against the release metadata before installing.
