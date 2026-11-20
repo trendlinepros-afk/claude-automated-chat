@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const log = require('electron-log/main');
@@ -8,6 +8,7 @@ const { RelayServer } = require('./mcpServer');
 const { Retention } = require('./retention');
 const { Settings } = require('./settings');
 const { Updater } = require('./updater');
+const { BackupManager, uncRoot } = require('./backup');
 
 log.initialize();
 log.transports.file.maxSize = 5 * 1024 * 1024;
@@ -16,7 +17,7 @@ Object.assign(console, log.functions);
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 app.setAppUserModelId('com.trendlinepros.agentrelay');
 
-let win = null, tray = null, store = null, relay = null, retention = null, settings = null, updater = null;
+let win = null, tray = null, store = null, relay = null, retention = null, settings = null, updater = null, backup = null;
 app.isQuitting = false;
 
 const ICON = path.join(__dirname, '..', 'build', 'icon.png');
@@ -52,12 +53,15 @@ function createTray() {
     { label: 'Open Agent Relay', click: showWindow },
     { label: 'Open vault folder', click: () => shell.openPath(settings.get().vaultPath) },
     { label: 'Check for updates', click: () => updater.check(true) },
+    { label: 'Back up now', click: () => backup.backup('manual').then(r => toastNotify('Backup complete', r.message)).catch(e => toastNotify('Backup failed', e.message)) },
     { type: 'separator' },
     { label: 'Quit (stops MCP server)', click: () => { app.isQuitting = true; app.quit(); } }
   ]);
   tray.setContextMenu(menu);
   tray.on('click', showWindow);
 }
+
+function toastNotify(title, body) { if (Notification.isSupported()) new Notification({ title, body: String(body).slice(0, 200), icon: ICON }).show(); }
 
 function applyLoginItem() {
   if (!app.isPackaged) return;
@@ -94,12 +98,47 @@ async function startServices() {
   retention.start();
 }
 
-async function restartServices() {
+async function stopServices() {
   if (retention) retention.stop();
   if (relay) await relay.stop();
-  if (store) store.saveStateNow();
+  if (store) { store.saveStateNow(); store.removeAllListeners(); }
+}
+
+async function restartServices() {
+  await stopServices();
   await startServices();
   send('relay:reset');
+}
+
+/** Connect to a network share with stored credentials (Windows `net use`). */
+function connectShare(target) {
+  const s = settings.get();
+  const root = uncRoot(target);
+  if (process.platform !== 'win32' || !root || !s.backupUser) return Promise.resolve();
+  let pass = '';
+  try { if (s.backupPasswordEnc) pass = safeStorage.decryptString(Buffer.from(s.backupPasswordEnc, 'base64')); } catch (e) { log.error('[backup] cannot decrypt password: ' + e.message); }
+  const { execFile } = require('child_process');
+  return new Promise(resolve => {
+    execFile('net', ['use', root, pass, `/user:${s.backupUser}`, '/persistent:no'], { windowsHide: true, timeout: 30000 }, (err, _out, errOut) => {
+      if (err && !/1219|already/i.test(String(errOut))) log.warn('[backup] net use: ' + String(errOut || err.message).trim());
+      resolve();
+    });
+  });
+}
+
+function initBackup() {
+  backup = new BackupManager({
+    getSettings: () => settings.get(),
+    getVaultPath: () => settings.get().vaultPath,
+    flush: () => store && store.saveStateNow(),
+    stopServices,
+    startServices: async () => { await startServices(); send('relay:reset'); },
+    applySettings: (patch) => settings.update(patch),
+    connectShare,
+    appVersion: app.getVersion(),
+    log
+  });
+  backup.configure();
 }
 
 function snapshot() {
@@ -115,6 +154,7 @@ function snapshot() {
     memory: retention.memoryStatus(),
     retentionHistory: retention.history,
     updater: updater.state,
+    backup: Object.assign({}, backup.state, { hasPassword: !!settings.get().backupPasswordEnc }),
     logFile: log.transports.file.getFile().path
   };
 }
@@ -142,7 +182,36 @@ function registerIpc() {
     if (needsRestart) await restartServices();
     else if (before.pruneIntervalHours !== after.pruneIntervalHours) retention.start();
     updater.configure();
+    backup.configure();
     return snapshot();
+  });
+  ipcMain.handle('relay:setBackupPassword', (_e, pw) => {
+    let enc = '';
+    if (pw) {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is not available on this system');
+      enc = safeStorage.encryptString(String(pw)).toString('base64');
+    }
+    settings.update({ backupPasswordEnc: enc });
+    return snapshot();
+  });
+  ipcMain.handle('relay:backupNow', async () => {
+    try { const r = await backup.backup('manual'); return { ok: true, message: r.message }; } catch (e) { return { ok: false, message: e.message }; }
+  });
+  ipcMain.handle('relay:listBackups', async () => {
+    try { return { ok: true, backups: await backup.list() }; } catch (e) { return { ok: false, message: e.message, backups: [] }; }
+  });
+  ipcMain.handle('relay:pickFolder', async (_e, title) => {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'], title: title || 'Choose folder' });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  ipcMain.handle('relay:restoreBackup', async (_e, dir, restoreSettings) => {
+    const r = await dialog.showMessageBox(win, {
+      type: 'warning', buttons: ['Cancel', 'Restore'], defaultId: 0, cancelId: 0,
+      message: 'Restore this backup?',
+      detail: `${dir}\n\nThe MCP server restarts briefly. Your current data is moved aside (not deleted) so you can undo.${restoreSettings ? '\nSettings will also be restored.' : ''}`
+    });
+    if (r.response !== 1) return { ok: false, cancelled: true };
+    try { const res = await backup.restore(dir, { restoreSettings }); applyLoginItem(); return { ok: true, message: res.message }; } catch (e) { return { ok: false, message: e.message }; }
   });
   ipcMain.handle('relay:regenKey', async () => {
     settings.update({ accessKey: require('crypto').randomBytes(12).toString('hex') });
@@ -186,6 +255,7 @@ app.whenReady().then(async () => {
   updater = new Updater(() => settings.get(), log, (st) => send('relay:update', st), () => { app.isQuitting = true; });
   registerIpc();
   await startServices();
+  initBackup();
   applyLoginItem();
   createTray();
   createWindow();

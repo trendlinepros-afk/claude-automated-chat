@@ -142,6 +142,18 @@
           <div id="retention-log" class="muted small-text"></div>
         </div>
         <div class="card">
+          <h2>Backup &amp; restore</h2>
+          <p class="muted">Back up the vault (chats, jobs, notes, attachments) and settings to a network share, e.g. <code>\\NAS\Backups\AgentRelay</code>. Restoring moves your current data aside first, so you can undo.</p>
+          <div class="row"><label>Backup folder / network share</label><div class="inline"><input data-setting="backupPath" class="wide" placeholder="\\server\share\AgentRelay"><button id="btn-pick-backup" class="ghost small">Browse…</button></div></div>
+          <div class="row"><label>Share username (optional)</label><input data-setting="backupUser" placeholder="DOMAIN\user (empty = your Windows login)"></div>
+          <div class="row"><label>Share password</label><div class="inline"><input id="backup-password" type="password" placeholder="(unchanged)"><button id="btn-set-backup-pw" class="ghost small">Save credentials</button><span id="backup-pw-status" class="muted"></span></div></div>
+          <div class="row"><label>Automatic backup every</label><div class="inline"><input type="number" step="1" data-setting="backupIntervalHours" class="narrow"> hours <span class="muted">(0 = manual only)</span></div></div>
+          <div class="row"><label>Keep the newest</label><div class="inline"><input type="number" data-setting="backupKeep" class="narrow"> backups</div></div>
+          <div class="row"><label>Status</label><div id="backup-status"></div></div>
+          <div class="row"><label></label><div><button id="btn-backup-now" class="primary small">Back up now</button> <button id="btn-list-backups" class="ghost small">Show backups</button> <button id="btn-restore-folder" class="ghost small">Restore from folder…</button> <label class="toggle"><input type="checkbox" id="restore-settings"> also restore settings</label></div></div>
+          <div id="backup-list"></div>
+        </div>
+        <div class="card">
           <h2>App</h2>
           <div class="row"><label>Start with Windows</label><label class="toggle"><input type="checkbox" data-setting="launchAtStartup"> Launch at login (runs in tray)</label></div>
           <div class="row"><label>Start minimized</label><label class="toggle"><input type="checkbox" data-setting="startMinimized"></label></div>

@@ -21,7 +21,13 @@ const DEFAULTS = {
   launchAtStartup: true,
   startMinimized: false,
   closeToTray: true,
-  notifications: true
+  notifications: true,
+  backupPath: '',           // e.g. \\\\NAS\\Backups\\AgentRelay
+  backupUser: '',           // optional share credentials (DOMAIN\\user)
+  backupPasswordEnc: '',    // encrypted with Windows DPAPI (safeStorage)
+  backupIntervalHours: 24,  // 0 = manual only
+  backupKeep: 10,
+  lastBackupAt: 0
 };
 
 class Settings {

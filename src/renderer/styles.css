@@ -116,3 +116,6 @@ pre.code { background: var(--bg); border: 1px solid var(--border); border-radius
 #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: grid; place-items: center; z-index: 50; cursor: zoom-out; }
 #lightbox img { max-width: 95vw; max-height: 95vh; }
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--accent); padding: 10px 16px; border-radius: 10px; z-index: 60; }
+.backup-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.backup-row .info { flex: 1; min-width: 0; }
+.backup-row .info .muted { font-size: 12px; }

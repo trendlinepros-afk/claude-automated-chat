@@ -32,14 +32,31 @@ jobs:
         run: npm test
 
       - name: Set version (major.minor from package.json, patch = run number)
+        id: ver
         shell: bash
         run: |
-          node -e "const fs=require('fs');const p=require('./package.json');const [a,b]=p.version.split('.');p.version=a+'.'+b+'.'+process.env.GITHUB_RUN_NUMBER;fs.writeFileSync('package.json',JSON.stringify(p,null,2));console.log('Version',p.version)"
+          VERSION=$(node -e "const fs=require('fs');const p=require('./package.json');const [a,b]=p.version.split('.');p.version=a+'.'+b+'.'+process.env.GITHUB_RUN_NUMBER;fs.writeFileSync('package.json',JSON.stringify(p,null,2));console.log(p.version)")
+          echo "Version $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish installer
+      - name: Build installer
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Publish GitHub release (read by the in-app auto-updater)
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --x64 --publish always
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          ls -la dist
+          gh release create "v$V" \
+            "dist/Agent-Relay-Setup.exe" \
+            "dist/Agent-Relay-Setup.exe.blockmap" \
+            "dist/latest.yml" \
+            --target "$GITHUB_SHA" \
+            --title "Agent Relay v$V" \
+            --notes "Automated build of ${GITHUB_SHA::7}: $(git log -1 --pretty=%s)" \
+            --latest
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

@@ -102,6 +102,15 @@ Configured in **Settings → History cleanup**:
 * **Memory pressure:** every minute the app checks system RAM %, its own memory use, and the number of loaded messages. If any limit is exceeded, it deletes the oldest chat files until it is back under the limits. It always keeps the most recent day(s).
 * **Manual:** *Run cleanup now* / *Delete all chat history*.
 
+## Backup & restore (network share)
+
+**Settings → Backup & restore**:
+
+* **Backup folder:** any folder or UNC path, e.g. `\\NAS\Backups\AgentRelay`. Leave the username empty to use the Windows login. Otherwise enter `DOMAIN\user` and a password: the password is encrypted with Windows DPAPI, and the app runs `net use` before each backup.
+* **Automatic backups** every N hours (default 24; 0 = manual only). An overdue backup runs shortly after the app starts. Only the newest *N* backups are kept (default 10).
+* **Back up now** (also in the tray menu). Each backup is a self-contained folder `AgentRelay-Backup-YYYYMMDD-HHMMSS/` with `vault/`, `settings.json` (without credentials) and `manifest.json`. It is written as `.partial` first, so an interrupted copy never looks like a valid backup.
+* **Restore:** *Show backups → Restore*, or *Restore from folder…*. The backup is copied to a staging folder first, then the server stops briefly, the current vault is moved aside to `<vault>.pre-restore-<timestamp>` (nothing is deleted), the backup is swapped in, and the server restarts. Tick *also restore settings* to bring back retention/server settings too; machine-specific paths and credentials are kept.
+
 ## Updates
 
 * On every launch and every 4 hours, the app checks GitHub Releases. If a newer version exists it downloads it, installs silently, and restarts (this can be turned off in Settings).

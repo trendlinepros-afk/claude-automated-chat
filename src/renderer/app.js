@@ -292,10 +292,55 @@ function renderSettings() {
   const s = snap.settings;
   $$('[data-setting]').forEach(el => { const v = s[el.dataset.setting]; if (el.type === 'checkbox') el.checked = !!v; else el.value = v ?? ''; });
   renderUpdate(snap.updater);
+  renderBackup();
   const m = snap.memory, st = snap.stats;
   $('#mem-status').textContent = `System RAM ${m.systemUsedPercent}% used (${m.systemFreeMB} MB free of ${m.systemTotalMB} MB) · App ${m.processRssMB} MB · ${st.messages} messages in ${st.chatFiles} chat file(s), ${kb(st.chatBytes)} · ${st.jobs} job(s)`;
   $('#retention-log').innerHTML = (snap.retentionHistory || []).slice(0, 8).map(e => `<div>${new Date(e.ts).toLocaleString()} [${esc(e.kind)}] ${esc(e.detail)}</div>`).join('');
 }
+function renderBackup() {
+  const b = snap.backup || {};
+  const last = snap.settings.lastBackupAt;
+  $('#backup-status').innerHTML = b.running ? 'Working…'
+    : `${b.lastError ? `<span style="color:var(--err)">${esc(b.lastError)}</span><br>` : ''}${esc(b.lastResult || '')}${last ? `<div class="muted">Last successful backup: ${new Date(last).toLocaleString()}</div>` : '<div class="muted">No backup yet</div>'}`;
+  $('#backup-pw-status').textContent = b.hasPassword ? 'password saved (encrypted)' : '';
+}
+function settingsPatch() {
+  const patch = {};
+  $$('[data-setting]').forEach(el => { const k = el.dataset.setting; patch[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value.trim(); });
+  return patch;
+}
+async function showBackups() {
+  $('#backup-list').innerHTML = '<div class="muted">Loading…</div>';
+  const r = await relay.listBackups();
+  if (!r.ok) { $('#backup-list').innerHTML = `<div style="color:var(--err)">${esc(r.message)}</div>`; return; }
+  $('#backup-list').innerHTML = r.backups.length ? r.backups.map(b => `<div class="backup-row"><div class="info"><div><b>${esc(new Date(b.manifest.created).toLocaleString())}</b> · v${esc(b.manifest.version)} · ${esc(b.manifest.reason)}</div><div class="muted">${b.manifest.files} files · ${kb(b.manifest.bytes)} · from ${esc(b.manifest.host)} · ${esc(b.path)}</div></div><button class="ghost small" data-restore="${esc(b.path)}">Restore</button></div>`).join('') : '<div class="muted">No backups in this folder yet.</div>';
+  $$('#backup-list [data-restore]').forEach(btn => btn.onclick = () => doRestore(btn.dataset.restore));
+}
+async function doRestore(dir) {
+  const r = await relay.restoreBackup(dir, $('#restore-settings').checked);
+  if (r.cancelled) return;
+  toast(r.ok ? 'Restore complete' : 'Restore failed: ' + r.message, 6000);
+  await refresh(); renderSettings();
+}
+$('#btn-pick-backup').onclick = async () => { const p = await relay.pickFolder('Choose backup folder (network share)'); if (p) $('[data-setting="backupPath"]').value = p; };
+$('#btn-set-backup-pw').onclick = async () => {
+  try {
+    snap = await relay.saveSettings({ backupUser: $('[data-setting="backupUser"]').value.trim() });
+    snap = await relay.setBackupPassword($('#backup-password').value);
+    $('#backup-password').value = ''; renderBackup(); toast('Share credentials saved');
+  } catch (e) { toast(e.message, 5000); }
+};
+$('#btn-backup-now').onclick = async () => {
+  snap = await relay.saveSettings(settingsPatch()); // use what's typed in the form
+  $('#backup-status').textContent = 'Backing up…';
+  const r = await relay.backupNow();
+  toast(r.ok ? 'Backup complete' : 'Backup failed: ' + r.message, 5000);
+  await refresh(); renderBackup();
+  if (r.ok && $('#backup-list').innerHTML) showBackups();
+};
+$('#btn-list-backups').onclick = async () => { snap = await relay.saveSettings(settingsPatch()); showBackups(); };
+$('#btn-restore-folder').onclick = async () => { const p = await relay.pickFolder('Choose an AgentRelay-Backup-… folder'); if (p) doRestore(p); };
+
 function renderUpdate(u) {
   if (!u) return;
   $('#upd-version').textContent = 'v' + snap.version;
@@ -304,8 +349,7 @@ function renderUpdate(u) {
   $('#update-badge').classList.toggle('hidden', u.status !== 'ready');
 }
 $('#btn-save').onclick = async () => {
-  const patch = {};
-  $$('[data-setting]').forEach(el => { const k = el.dataset.setting; patch[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value.trim(); });
+  const patch = settingsPatch();
   $('#save-status').textContent = 'Saving…';
   snap = await relay.saveSettings(patch);
   $('#save-status').textContent = 'Saved ✓';

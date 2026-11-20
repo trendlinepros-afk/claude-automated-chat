@@ -99,6 +99,31 @@ const t = (r) => r.content.filter(c => c.type === 'text').map(c => c.text).join(
   assert.strictEqual(removed, 1);
   console.log('Retention OK');
 
+  // backup & restore (simulated network share = temp folder)
+  const { BackupManager } = require('../src/backup');
+  const share = fs.mkdtempSync(path.join(os.tmpdir(), 'share-'));
+  const bset = Object.assign({}, settings, { backupPath: share, backupKeep: 2, backupPasswordEnc: 'SECRET' });
+  let live = store4, events = [];
+  const bm = new BackupManager({
+    getSettings: () => bset, getVaultPath: () => dir, flush: () => live.saveStateNow(),
+    stopServices: async () => events.push('stop'), startServices: async () => { events.push('start'); live = new VaultStore(dir, { operatorName: 'Operator' }).init(); },
+    applySettings: (p) => Object.assign(bset, p), appVersion: 'test', log: { info() {}, error: console.error }
+  });
+  const b1 = await bm.backup('manual');
+  assert(fs.existsSync(path.join(b1.path, 'vault', 'Jobs')));
+  assert(!JSON.parse(fs.readFileSync(path.join(b1.path, 'settings.json'), 'utf8')).backupPasswordEnc, 'password not copied to share');
+  const countAtBackup = live.messages.length;
+  live.postMessage({ from: 'PC-A', to: 'PC-B', text: 'after backup' });
+  await new Promise(r => setTimeout(r, 1100)); await bm.backup('scheduled');
+  await new Promise(r => setTimeout(r, 1100)); await bm.backup('scheduled');
+  assert.strictEqual((await bm.list()).length, 2, 'keeps newest 2');
+  const res = await bm.restore((await bm.list())[1].path);
+  assert.deepStrictEqual(events, ['stop', 'start']);
+  assert(fs.existsSync(res.previous), 'previous data kept aside');
+  assert.strictEqual(live.messages.length, countAtBackup + 1);
+  await assert.rejects(() => bm.restore(share), /not an Agent Relay backup/);
+  console.log('Backup/restore OK');
+
   await a.close(); await b.close();
   await srv.stop();
   console.log('\nALL TESTS PASSED');
