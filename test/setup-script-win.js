@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const assert = require('assert');
-const { spawnSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const { VaultStore } = require('../src/store');
 const { RelayServer } = require('../src/mcpServer');
 const { ensureCerts } = require('../src/tls');
@@ -20,9 +20,16 @@ if (process.platform !== 'win32') { console.log('setup script test skipped (Wind
 
 const shells = [['powershell.exe', 'Windows PowerShell 5.1'], ['pwsh.exe', 'PowerShell 7']];
 
+// Must be asynchronous: the relay server under test runs in this same process.
 function runPs(exe, scriptFile, env) {
-  const r = spawnSync(exe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { env: Object.assign({}, process.env, env), encoding: 'utf8', timeout: 120000 });
-  return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  return new Promise((resolve) => {
+    const child = spawn(exe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { env: Object.assign({}, process.env, env) });
+    let out = '';
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    const t = setTimeout(() => child.kill(), 120000);
+    child.on('close', code => { clearTimeout(t); resolve({ code, out }); });
+  });
 }
 
 function mcpInitialize(entry) {
@@ -51,7 +58,7 @@ function mcpInitialize(entry) {
   const srv = new RelayServer(new VaultStore(path.join(work, 'vault'), {}).init(), () => settings, { info() {}, error: console.error }, () => ensureCerts(path.join(work, 'tls'), { info() {} }));
   await srv.start();
   assert(srv.status.running && srv.status.tls);
-  const server = 'https://localhost:3790';
+  const server = 'https://127.0.0.1:3790';
   const url = `${server}/mcp/CI-PC?key=${settings.accessKey}`;
   const caPath = path.join(work, 'client', 'relay-ca.pem');
   const script = buildSetupScript({ url, server, tls: true, caHash: certs.caHash, agent: 'CI-PC', caPath });
@@ -65,7 +72,7 @@ function mcpInitialize(entry) {
     // 1) Existing config with other servers, other settings and a trailing comma (lenient parsers accept it).
     const good = path.join(dir, 'good.json');
     fs.writeFileSync(good, '{\n  "preferences": { "theme": "dark", "list": ["only-one"] },\n  "mcpServers": {\n    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\\\Users"] },\n  }\n}\n');
-    const r1 = runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: good });
+    const r1 = await runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: good });
     console.log(r1.out.trim());
     assert(/Relay reachable and certificate trusted/.test(r1.out), 'built-in connection test passes');
     const cfg = JSON.parse(fs.readFileSync(good, 'utf8').replace(/^\ufeff/, '')); // strict, like Claude Desktop
@@ -79,14 +86,14 @@ function mcpInitialize(entry) {
     assert.strictEqual(fs.readFileSync(caPath, 'utf8'), certs.caPem, 'certificate downloaded + verified');
     assert(fs.readdirSync(dir).some(f => f.startsWith('good.json.bak-')), 'backup made');
     // Running it again is idempotent.
-    runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: good });
+    await runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: good });
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(good, 'utf8')).mcpServers['agent-relay'], entry);
 
     // 2) The exact mistake from the field: a whole { "mcpServers": ... } snippet pasted as a second object.
     const broken = path.join(dir, 'broken.json');
     const brokenText = '{\n  "preferences": {\n    "theme": "dark"\n  },\n{\n  "mcpServers": {\n    "agent-relay": { "command": "npx", "args": [] }\n  }\n}\n';
     fs.writeFileSync(broken, brokenText);
-    const r2 = runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: broken });
+    const r2 = await runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: broken });
     console.log(r2.out.trim());
     assert.strictEqual(fs.readFileSync(broken, 'utf8'), brokenText, 'broken config left untouched');
     assert(/not valid JSON/.test(r2.out), 'explains the problem');
@@ -94,7 +101,7 @@ function mcpInitialize(entry) {
 
     // 3) No config yet → created.
     const fresh = path.join(dir, 'new', 'claude_desktop_config.json');
-    runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: fresh });
+    await runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: fresh });
     assert(JSON.parse(fs.readFileSync(fresh, 'utf8')).mcpServers['agent-relay'], 'fresh config created');
 
     // 4) Wrong fingerprint → stops before touching the config.
@@ -102,7 +109,7 @@ function mcpInitialize(entry) {
     fs.writeFileSync(bad, '\ufeff' + buildSetupScript({ url, server, tls: true, caHash: 'DEADBEEF', agent: 'CI-PC', caPath: path.join(dir, 'ca2.pem') }));
     const untouched = path.join(dir, 'untouched.json');
     fs.writeFileSync(untouched, '{"mcpServers":{}}');
-    const r4 = runPs(exe, bad, { AGENT_RELAY_CONFIG_PATHS: untouched });
+    const r4 = await runPs(exe, bad, { AGENT_RELAY_CONFIG_PATHS: untouched });
     assert(/fingerprint does not match/.test(r4.out), 'fingerprint mismatch detected');
     assert.strictEqual(fs.readFileSync(untouched, 'utf8'), '{"mcpServers":{}}', 'config untouched on mismatch');
     assert(!fs.existsSync(path.join(dir, 'ca2.pem')), 'bad certificate removed');
