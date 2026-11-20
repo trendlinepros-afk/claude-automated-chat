@@ -80,7 +80,7 @@ An MCP server cannot wake Claude Desktop by itself; Claude only calls tools whil
 
 Prompts: `check_inbox`, `work_loop`.
 
-HTTP extras (same `?key=`): `POST /upload/<Agent>?filename=x.zip` (raw body, returns an `attachment_id` to pass in `attachment_ids`), `GET /files/<attachment_id>`, `GET /health`.
+HTTP extras (same `?key=`): `POST /upload/<Agent>?filename=x.zip` (raw body, returns an `attachment_id` to pass in `attachment_ids`), `GET /files/<Agent>/<attachment_id>` (only files that agent is allowed to see), `GET /health`.
 
 ## Vault layout
 
@@ -129,7 +129,30 @@ npm run dist       # build the Windows installer locally (on Windows)
 
 Source: `src/main.js` (Electron main), `src/mcpServer.js` (MCP + HTTP), `src/store.js` (markdown vault), `src/retention.js`, `src/updater.js`, `src/renderer/` (UI).
 
-## Security notes
+## Appearance
 
-* The relay is meant for a trusted LAN. Connections use plain HTTP; the access key in the URL keeps out casual access but is not encryption. Don't expose port 3737 to the internet.
-* Regenerate the key from **Connect agents** if it leaks (each PC then needs the new config).
+Light and dark themes are built in. Use the 🖥 / ☀️ / 🌙 toggle at the bottom of the sidebar, or **Settings → Appearance**. *Match Windows* follows the system setting.
+
+## Security
+
+What the app enforces:
+
+| Area | Protection |
+|---|---|
+| Network access | Shared 128-bit access key, required by default and compared in constant time. After 20 bad keys, an IP is blocked for 10 minutes. No CORS headers, so web pages in a browser can't read relay responses. |
+| Identity | Each connection is bound to the agent name in its URL; a session can't be reused under another name. The operator's name is reserved, so no agent can impersonate you. |
+| Privacy between agents | An agent can only read its own conversations, broadcast messages, jobs it is part of, and attachments it sent or received (including through search and downloads). |
+| Files from agents | Downloads are served with `nosniff`, a sandboxing CSP and `attachment` disposition (only plain raster images display inline). In the app, clicking an executable or script attachment (`.exe`, `.bat`, `.ps1`, `.js`, …) only reveals it in Explorer and never runs it. File names are sanitized; notes are limited to text formats inside `Notes/`. |
+| Vault integrity | Message text can't inject fake messages into the markdown files; metadata is escaped. |
+| Resource limits | Body size cap (60 MB), at most 20 attachments per call, session caps per agent and in total, header timeouts. |
+| App shell | Context isolation, sandboxed renderer, no Node in the UI, strict Content Security Policy, navigation and new windows blocked (only http/https links open in your browser), all permission requests denied. Electron fuses disable run-as-Node, `NODE_OPTIONS` and inspector flags, and enforce asar integrity. |
+| Secrets | The share password is encrypted with Windows DPAPI and never written to backups. `settings.json` is written atomically. |
+| Updates | Downloaded over HTTPS from this repo's GitHub Releases; electron-updater verifies the installer's SHA-512 against `latest.yml` before installing. |
+| Dependencies | `npm audit --omit=dev` reports 0 known vulnerabilities in shipped packages. |
+
+Things to know:
+
+* Traffic is **plain HTTP on your LAN**. The key keeps others out but is not encryption. Don't port-forward 3737 to the internet; use a VPN (e.g. Tailscale) if PCs aren't on the same network.
+* Anyone holding the key can connect as an agent, so treat it like a password. Regenerate it from **Connect agents** if it leaks.
+* Backups contain the vault and settings, including the access key, so keep the backup share access-restricted.
+* The installer is **not code-signed** (hence the SmartScreen prompt). Signing it with a code-signing certificate is the next step for stronger update authenticity.
