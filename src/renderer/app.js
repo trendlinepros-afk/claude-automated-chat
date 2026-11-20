@@ -191,6 +191,7 @@ function hydrate(root) {
 $('#lightbox').addEventListener('click', () => $('#lightbox').classList.add('hidden'));
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+  if (!$('#modal').classList.contains('hidden')) { const c = $('#m-cancel'); if (c) c.click(); return; }
   if (!$('#lightbox').classList.contains('hidden')) { $('#lightbox').classList.add('hidden'); return; }
   if (!$('#job-detail').classList.contains('hidden')) { $('#job-detail').classList.add('hidden'); openJobId = null; renderJobs(); }
 });
@@ -371,12 +372,103 @@ function renderSettings() {
   $('#mem-status').textContent = `System RAM ${m.systemUsedPercent}% used (${m.systemFreeMB} MB free of ${m.systemTotalMB} MB) · App ${m.processRssMB} MB · ${st.messages} messages in ${st.chatFiles} chat file(s), ${kb(st.chatBytes)} · ${st.jobs} job(s)`;
   $('#retention-log').innerHTML = (snap.retentionHistory || []).slice(0, 8).map(e => `<div>${new Date(e.ts).toLocaleString()} [${esc(e.kind)}] ${esc(e.detail)}</div>`).join('');
 }
+// ---------- modal dialogs ----------
+function openModal(html) { $('#modal-box').innerHTML = html; $('#modal').classList.remove('hidden'); }
+function closeModal() { $('#modal').classList.add('hidden'); $('#modal-box').innerHTML = ''; }
+
+/** Ask "encrypt?" and, if yes, a password (entered twice). Resolves {encrypt, password} or null if cancelled. */
+function askEncryption({ title, schedule }) {
+  return new Promise(resolve => {
+    openModal(`<h2>${esc(title)}</h2>
+      <p class="muted">${schedule ? 'Should automatic backups be encrypted?' : 'Should this backup be encrypted?'} Encrypted backups are a single sealed file — chats, files, notes and settings can only be read with the password.</p>
+      <div class="choice-row">
+        <button class="choice" data-enc="no"><b>No</b><span>Plain folder — anyone who can open the share can read it</span></button>
+        <button class="choice" data-enc="yes"><b>🔒 Yes, encrypt</b><span>Protected with a password you choose</span></button>
+      </div>
+      <div id="pw-fields" class="hidden">
+        <label>Password (at least 8 characters)<input type="password" id="pw1" autocomplete="new-password"></label>
+        <label>Type it again<input type="password" id="pw2" autocomplete="new-password"></label>
+        <p class="warn-text">⚠️ If you forget this password, ${schedule ? 'these backups' : 'this backup'} can't be restored — there is no recovery.
+        ${schedule ? 'The app keeps it locked with Windows security on this PC so scheduled backups can run on their own; you only need it to restore.' : "It isn't saved anywhere."}</p>
+      </div>
+      <div class="modal-actions"><span id="m-err" class="err-text"></span><button class="ghost" id="m-cancel">Cancel</button><button class="primary" id="m-ok" disabled>Continue</button></div>`);
+    let choice = null;
+    const done = (v) => { closeModal(); resolve(v); };
+    $$('#modal-box [data-enc]').forEach(b => b.onclick = () => {
+      choice = b.dataset.enc;
+      $$('#modal-box [data-enc]').forEach(x => x.classList.toggle('selected', x === b));
+      $('#pw-fields').classList.toggle('hidden', choice !== 'yes');
+      $('#m-ok').disabled = false;
+      $('#m-ok').textContent = choice === 'yes' ? 'Encrypt' : 'Continue';
+      if (choice === 'yes') $('#pw1').focus();
+    });
+    const submit = () => {
+      if (!choice) return;
+      if (choice === 'no') return done({ encrypt: false, password: null });
+      const a = $('#pw1').value, b = $('#pw2').value;
+      if (a.length < 8) { $('#m-err').textContent = 'Use at least 8 characters.'; return; }
+      if (a !== b) { $('#m-err').textContent = "The passwords don't match."; return; }
+      done({ encrypt: true, password: a });
+    };
+    $('#m-ok').onclick = submit;
+    $('#m-cancel').onclick = () => done(null);
+    $('#modal-box').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') submit(); });
+  });
+}
+
+/** Ask for an existing password. Resolves the password or null if cancelled. */
+function askPassword({ title, message, error }) {
+  return new Promise(resolve => {
+    openModal(`<h2>${esc(title)}</h2><p class="muted">${esc(message)}</p>
+      <label>Password<input type="password" id="pw1" autocomplete="current-password"></label>
+      <div class="modal-actions"><span id="m-err" class="err-text">${esc(error || '')}</span><button class="ghost" id="m-cancel">Cancel</button><button class="primary" id="m-ok">Restore</button></div>`);
+    const done = (v) => { closeModal(); resolve(v); };
+    const submit = () => { const v = $('#pw1').value; if (!v) { $('#m-err').textContent = 'Enter the password.'; return; } done(v); };
+    $('#m-ok').onclick = submit;
+    $('#m-cancel').onclick = () => done(null);
+    $('#pw1').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    $('#pw1').focus();
+  });
+}
+
+function scheduleOn(st) { return !!(st.backupPath && Number(st.backupIntervalHours) > 0); }
+
+/** Save the settings form; if this creates (or re-creates) a backup schedule, ask about encryption. */
+async function saveSettingsForm({ askIfUnanswered = false } = {}) {
+  const before = snap.settings;
+  try { snap = await relay.saveSettings(settingsPatch()); }
+  catch (e) { toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 6000); return false; }
+  // Ask when a schedule is created (or re-enabled); the Save button also asks if it was never answered.
+  const created = scheduleOn(snap.settings) && !scheduleOn(before);
+  if (created || (askIfUnanswered && scheduleOn(snap.settings) && !snap.settings.backupEncryptChosen)) await chooseScheduleEncryption();
+  return true;
+}
+
+async function chooseScheduleEncryption() {
+  const c = await askEncryption({ title: 'Automatic backups', schedule: true });
+  if (!c) {
+    if (!snap.settings.backupEncryptChosen) toast('Automatic backups are paused until you choose whether to encrypt them.', 5000);
+    renderBackup(); return;
+  }
+  try { snap = await relay.setBackupSchedule(c); toast(c.encrypt ? '🔒 Automatic backups will be encrypted' : 'Automatic backups will not be encrypted'); }
+  catch (e) { toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 6000); }
+  renderBackup();
+}
+
 function renderBackup() {
   const b = snap.backup || {};
   const last = snap.settings.lastBackupAt;
   $('#backup-status').innerHTML = b.running ? 'Working…'
     : `${b.lastError ? `<span style="color:var(--err)">${esc(b.lastError)}</span><br>` : ''}${esc(b.lastResult || '')}${last ? `<div class="muted">Last successful backup: ${new Date(last).toLocaleString()}</div>` : '<div class="muted">No backup yet</div>'}`;
   $('#backup-pw-status').textContent = b.hasPassword ? 'password saved (encrypted)' : '';
+  const st = snap.settings;
+  const sched = !st.backupPath ? 'Set a backup folder to enable automatic backups'
+    : !(Number(st.backupIntervalHours) > 0) ? 'Off — manual backups only'
+      : !st.backupEncryptChosen ? '⏸ Paused — choose whether to encrypt them'
+        : `Every ${st.backupIntervalHours} h · ${b.scheduleEncrypted ? '🔒 encrypted' : 'not encrypted'}`;
+  $('#schedule-status').textContent = sched;
+  $('#btn-schedule-enc').classList.toggle('hidden', !scheduleOn(st));
+  $('#btn-schedule-enc').textContent = st.backupEncryptChosen ? 'Change encryption…' : 'Choose…';
 }
 function settingsPatch() {
   const patch = {};
@@ -387,12 +479,19 @@ async function showBackups() {
   $('#backup-list').innerHTML = '<div class="muted">Loading…</div>';
   const r = await relay.listBackups();
   if (!r.ok) { $('#backup-list').innerHTML = `<div style="color:var(--err)">${esc(r.message)}</div>`; return; }
-  $('#backup-list').innerHTML = r.backups.length ? r.backups.map(b => `<div class="backup-row"><div class="info"><div><b>${esc(new Date(b.manifest.created).toLocaleString())}</b> · v${esc(b.manifest.version)} · ${esc(b.manifest.reason)}</div><div class="muted">${b.manifest.files} files · ${kb(b.manifest.bytes)} · from ${esc(b.manifest.host)} · ${esc(b.path)}</div></div><button class="ghost small" data-restore="${esc(b.path)}">Restore</button></div>`).join('') : '<div class="muted">No backups in this folder yet.</div>';
+  $('#backup-list').innerHTML = r.backups.length ? r.backups.map(b => `<div class="backup-row"><div class="info"><div><b>${esc(new Date(b.manifest.created).toLocaleString())}</b>${b.manifest.encrypted ? '<span class="lock">🔒 encrypted</span>' : ''} · v${esc(b.manifest.version)} · ${esc(b.manifest.reason)}</div><div class="muted">${b.manifest.files} files · ${kb(b.manifest.bytes)} · from ${esc(b.manifest.host)} · ${esc(b.path)}</div></div><button class="ghost small" data-restore="${esc(b.path)}">Restore</button></div>`).join('') : '<div class="muted">No backups in this folder yet.</div>';
   $$('#backup-list [data-restore]').forEach(btn => btn.onclick = () => doRestore(btn.dataset.restore));
 }
 async function doRestore(dir) {
-  const r = await relay.restoreBackup(dir, $('#restore-settings').checked);
+  const withSettings = $('#restore-settings').checked;
+  let r = await relay.restoreBackup(dir, withSettings, null, false);
   if (r.cancelled) return;
+  // Encrypted backup: ask for the password (again, if it was wrong) — the live data is untouched until it's right.
+  while (!r.ok && (r.needPassword || r.wrongPassword)) {
+    const pw = await askPassword({ title: '🔒 Restore encrypted backup', message: 'Enter the password this backup was created with.', error: r.wrongPassword ? 'Wrong password — try again.' : '' });
+    if (pw == null) return;
+    r = await relay.restoreBackup(dir, withSettings, pw, true);
+  }
   toast(r.ok ? 'Restore complete' : 'Restore failed: ' + r.message, 6000);
   await refresh(); renderSettings();
 }
@@ -405,14 +504,18 @@ $('#btn-set-backup-pw').onclick = async () => {
   } catch (e) { toast(e.message, 5000); }
 };
 $('#btn-backup-now').onclick = async () => {
-  snap = await relay.saveSettings(settingsPatch()); // use what's typed in the form
-  $('#backup-status').textContent = 'Backing up…';
-  const r = await relay.backupNow();
+  if (!await saveSettingsForm()) return; // use what's typed in the form
+  if (!snap.settings.backupPath) { toast('Set a backup folder first'); return; }
+  const c = await askEncryption({ title: 'Back up now', schedule: false });
+  if (!c) return;
+  $('#backup-status').textContent = c.encrypt ? 'Encrypting and backing up…' : 'Backing up…';
+  const r = await relay.backupNow(c.encrypt ? c.password : null);
   toast(r.ok ? 'Backup complete' : 'Backup failed: ' + r.message, 5000);
   await refresh(); renderBackup();
   if (r.ok && $('#backup-list').innerHTML) showBackups();
 };
-$('#btn-list-backups').onclick = async () => { snap = await relay.saveSettings(settingsPatch()); showBackups(); };
+$('#btn-list-backups').onclick = async () => { if (await saveSettingsForm()) showBackups(); };
+$('#btn-schedule-enc').onclick = () => chooseScheduleEncryption();
 $('#btn-restore-folder').onclick = async () => { const p = await relay.pickFolder('Choose an AgentRelay-Backup-… folder'); if (p) doRestore(p); };
 
 function renderUpdate(u) {
@@ -423,10 +526,8 @@ function renderUpdate(u) {
   $('#update-badge').classList.toggle('hidden', u.status !== 'ready');
 }
 $('#btn-save').onclick = async () => {
-  const patch = settingsPatch();
   $('#save-status').textContent = 'Saving…';
-  try { snap = await relay.saveSettings(patch); }
-  catch (e) { $('#save-status').textContent = ''; toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 6000); return; }
+  if (!await saveSettingsForm({ askIfUnanswered: true })) { $('#save-status').textContent = ''; return; }
   renderSettings();
   $('#save-status').textContent = 'Saved ✓';
   setTimeout(() => $('#save-status').textContent = '', 2500);
@@ -458,6 +559,7 @@ relay.onJobs(j => { snap.jobs = j; renderSidebar(); if ($('#view-jobs').classLis
 relay.onReset(async () => { await refresh(); if ($('#view-chat').classList.contains('active')) openChannel(current); });
 relay.onUpdate(u => { snap.updater = u; renderUpdate(u); if (u.status === 'ready') toast(u.message, 6000); });
 relay.onRetention(e => toast(`Cleanup: ${e.detail}`, 5000));
+relay.onTrayBackup(() => { showView('settings'); setTimeout(() => $('#btn-backup-now').click(), 300); });
 window.addEventListener('focus', () => { const s = channelSummary(current); if (s) { setLastRead(current, s.lastSeq); renderSidebar(); } });
 setInterval(async () => { if (snap) { const fresh = await relay.snapshot(); snap.connection = fresh.connection; snap.memory = fresh.memory; snap.stats = fresh.stats; snap.agents = fresh.agents; renderAll(); } }, 30000);
 

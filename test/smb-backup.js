@@ -76,6 +76,20 @@ function disconnect() { try { execFileSync('net', ['use', uncRoot(SHARE_UNC), '/
   // 5) Restoring something that is not a backup is refused and leaves data alone.
   await assert.rejects(() => bm.restore(target), /not an Agent Relay backup/);
 
+  // 6) Encrypted backup over the share: sealed file, wrong password refused, right password restores.
+  store.postMessage({ from: 'PC-A', to: 'PC-B', text: 'encrypted over smb' });
+  await new Promise(r => setTimeout(r, 1100));
+  const enc = await bm.backup('manual', { password: 'smb-backup-pass' });
+  console.log('  ' + enc.message);
+  const encLocal = path.join(SHARE_LOCAL, 'AgentRelay', path.basename(enc.path));
+  assert(fs.existsSync(path.join(encLocal, 'backup.arenc')) && !fs.existsSync(path.join(encLocal, 'vault')), 'only the sealed file on the share');
+  assert(!fs.readFileSync(path.join(encLocal, 'backup.arenc')).includes(Buffer.from('encrypted over smb')), 'content not readable on the share');
+  store.postMessage({ from: 'PC-A', to: 'PC-B', text: 'after encrypted backup' });
+  await assert.rejects(() => bm.restore(enc.path, { password: 'wrong-password' }), e => e.code === 'WRONG_PASSWORD');
+  assert(store.messages.some(m => m.text === 'after encrypted backup'), 'wrong password changed nothing');
+  await bm.restore(enc.path, { password: 'smb-backup-pass' });
+  assert(store.messages.some(m => m.text === 'encrypted over smb') && !store.messages.some(m => m.text === 'after encrypted backup'), 'encrypted restore over SMB');
+
   disconnect();
   console.log('\nSMB BACKUP TEST PASSED');
 })().catch(e => { console.error(e); disconnect(); process.exit(1); });

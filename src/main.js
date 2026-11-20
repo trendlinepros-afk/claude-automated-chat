@@ -70,7 +70,7 @@ function createTray() {
     { label: 'Open Agent Relay', click: showWindow },
     { label: 'Open vault folder', click: () => shell.openPath(settings.get().vaultPath) },
     { label: 'Check for updates', click: () => updater.check(true) },
-    { label: 'Back up now', click: () => backup.backup('manual').then(r => toastNotify('Backup complete', r.message)).catch(e => toastNotify('Backup failed', e.message)) },
+    { label: 'Back up now…', click: () => { showWindow(); send('relay:trayBackup'); } }, // asks encrypt yes/no in the window
     { type: 'separator' },
     { label: 'Quit (stops MCP server)', click: () => { app.isQuitting = true; app.quit(); } }
   ]);
@@ -151,6 +151,11 @@ function initBackup() {
     startServices: async () => { await startServices(); send('relay:reset'); },
     applySettings: (patch) => settings.update(patch),
     connectShare,
+    getSchedulePassword: () => {
+      const enc = settings.get().backupSchedulePasswordEnc;
+      if (!enc) return null;
+      try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); } catch (e) { log.error('[backup] cannot unlock schedule password: ' + e.message); return null; }
+    },
     tlsDir: tlsDir(),
     appVersion: app.getVersion(),
     log
@@ -171,7 +176,7 @@ function snapshot() {
     memory: retention.memoryStatus(),
     retentionHistory: retention.history,
     updater: updater.state,
-    backup: Object.assign({}, backup.state, { hasPassword: !!settings.get().backupPasswordEnc }),
+    backup: Object.assign({}, backup.state, { hasPassword: !!settings.get().backupPasswordEnc, scheduleEncrypted: !!settings.get().backupEncrypt && !!settings.get().backupSchedulePasswordEnc }),
     logFile: log.transports.file.getFile().path
   };
 }
@@ -198,7 +203,7 @@ function registerIpc() {
   ipcMain.handle('relay:channelFor', (_e, a, b) => channelFor(a, b));
   ipcMain.handle('relay:saveSettings', async (_e, patch) => {
     patch = Object.assign({}, patch);
-    for (const k of ['accessKey', 'backupPasswordEnc', 'lastBackupAt']) delete patch[k]; // managed elsewhere
+    for (const k of ['accessKey', 'backupPasswordEnc', 'lastBackupAt', 'backupEncrypt', 'backupEncryptChosen', 'backupSchedulePasswordEnc']) delete patch[k]; // managed elsewhere
     if ('operatorName' in patch && !store.validName(patch.operatorName)) throw new Error('Your name must start with a letter/digit and use only letters, digits, _ . - (max 40)');
     const before = settings.get();
     const after = settings.update(patch);
@@ -220,8 +225,22 @@ function registerIpc() {
     settings.update({ backupPasswordEnc: enc });
     return snapshot();
   });
-  ipcMain.handle('relay:backupNow', async () => {
-    try { const r = await backup.backup('manual'); return { ok: true, message: r.message }; } catch (e) { return { ok: false, message: e.message }; }
+  // One-time backup: the password (if any) is used for this backup only and never stored.
+  ipcMain.handle('relay:backupNow', async (_e, password) => {
+    if (password != null && String(password).length < 8) return { ok: false, message: 'The password must be at least 8 characters.' };
+    try { const r = await backup.backup('manual', { password: password || null }); return { ok: true, message: r.message }; } catch (e) { return { ok: false, message: e.message }; }
+  });
+  // Automatic backups: remember the choice; the password is locked with Windows DPAPI so scheduled runs can use it.
+  ipcMain.handle('relay:setBackupSchedule', (_e, { encrypt, password }) => {
+    if (encrypt) {
+      if (!password || String(password).length < 8) throw new Error('The password must be at least 8 characters.');
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage is not available on this system, so the schedule password cannot be saved.');
+      settings.update({ backupEncrypt: true, backupEncryptChosen: true, backupSchedulePasswordEnc: safeStorage.encryptString(String(password)).toString('base64') });
+    } else {
+      settings.update({ backupEncrypt: false, backupEncryptChosen: true, backupSchedulePasswordEnc: '' });
+    }
+    backup.configure();
+    return snapshot();
   });
   ipcMain.handle('relay:listBackups', async () => {
     try { return { ok: true, backups: await backup.list() }; } catch (e) { return { ok: false, message: e.message, backups: [] }; }
@@ -230,14 +249,15 @@ function registerIpc() {
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'], title: title || 'Choose folder' });
     return r.canceled ? null : r.filePaths[0];
   });
-  ipcMain.handle('relay:restoreBackup', async (_e, dir, restoreSettings) => {
-    const r = await dialog.showMessageBox(win, {
+  ipcMain.handle('relay:restoreBackup', async (_e, dir, restoreSettings, password, alreadyConfirmed) => {
+    const r = alreadyConfirmed ? { response: 1 } : await dialog.showMessageBox(win, {
       type: 'warning', buttons: ['Cancel', 'Restore'], defaultId: 0, cancelId: 0,
       message: 'Restore this backup?',
       detail: `${dir}\n\nThe MCP server restarts briefly. Your current data is moved aside (not deleted) so you can undo.${restoreSettings ? '\nSettings will also be restored.' : ''}`
     });
     if (r.response !== 1) return { ok: false, cancelled: true };
-    try { const res = await backup.restore(dir, { restoreSettings }); applyLoginItem(); return { ok: true, message: res.message }; } catch (e) { return { ok: false, message: e.message }; }
+    try { const res = await backup.restore(dir, { restoreSettings, password: password || null }); applyLoginItem(); applyTheme(); return { ok: true, message: res.message }; }
+    catch (e) { return { ok: false, message: e.message, wrongPassword: e.code === 'WRONG_PASSWORD', needPassword: e.code === 'PASSWORD_REQUIRED' }; }
   });
   ipcMain.handle('relay:regenKey', async () => {
     settings.update({ accessKey: require('crypto').randomBytes(16).toString('hex') });

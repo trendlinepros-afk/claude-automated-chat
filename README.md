@@ -119,8 +119,14 @@ Configured in **Settings → History cleanup**:
 
 * **Backup folder:** any folder or UNC path, e.g. `\\NAS\Backups\AgentRelay`. Leave the username empty to use the Windows login. Otherwise enter `DOMAIN\user` and a password: the password is encrypted with Windows DPAPI, and the app runs `net use` before each backup.
 * **Automatic backups** every N hours (default 24; 0 = manual only). An overdue backup runs shortly after the app starts. Only the newest *N* backups are kept (default 10).
-* **Back up now** (also in the tray menu). Each backup is a self-contained folder `AgentRelay-Backup-YYYYMMDD-HHMMSS/` with `vault/`, `settings.json` (without credentials) and `manifest.json`. It is written as `.partial` first, so an interrupted copy never looks like a valid backup.
-* **Restore:** *Show backups → Restore*, or *Restore from folder…*. The backup is copied to a staging folder first, then the server stops briefly, the current vault is moved aside to `<vault>.pre-restore-<timestamp>` (nothing is deleted), the backup is swapped in, and the server restarts. Tick *also restore settings* to bring back retention/server settings too; machine-specific paths and credentials are kept.
+* **Encryption, asked when you need it:**
+  * **Back up now** (also in the tray menu) asks *"Encrypt this backup?"*. Choose **Yes** and type a password twice. It's used for that backup only and **isn't stored anywhere**.
+  * When you **create a backup schedule** (set a folder and an interval, then Save), the same question appears for automatic backups. If you choose a password, the app keeps it locked with Windows security (DPAPI) on this PC so scheduled backups run on their own. You only need to remember it to restore. Change it any time with **Change encryption…** (older backups keep the password they were made with).
+  * Encrypted backups are a single sealed file (`backup.arenc`, AES-256-GCM with a key derived from your password via scrypt). Chats, files, notes, settings and even file names are unreadable without the password, and tampering or truncation is detected. The list shows them with 🔒.
+  * **If you forget the password, that backup can't be restored. There is no recovery.**
+  * If encrypted automatic backups are on but the saved password can't be unlocked, the backup fails with a clear message rather than silently writing an unencrypted one.
+* Each backup is a timestamped folder `AgentRelay-Backup-YYYYMMDD-HHMMSS/` with `manifest.json` plus either `backup.arenc` (encrypted) or `vault/` + `settings.json` (plain). Stored passwords are never included. It's written as `.partial` first, so an interrupted copy never looks like a valid backup.
+* **Restore:** *Show backups → Restore*, or *Restore from folder…*. Encrypted backups ask for their password; a wrong password changes nothing. The backup is decrypted/copied to a staging folder first, then the server stops briefly, the current vault is moved aside to `<vault>.pre-restore-<timestamp>` (nothing is deleted), the backup is swapped in, and the server restarts. Tick *also restore settings* to bring back retention/server settings too; machine-specific paths and credentials are kept.
 
 ## Updates
 

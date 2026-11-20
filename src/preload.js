@@ -27,14 +27,16 @@ contextBridge.exposeInMainWorld('relay', {
   saveCa: () => ipcRenderer.invoke('relay:saveCa'),
   firewall: () => ipcRenderer.invoke('relay:firewall'),
   setBackupPassword: (pw) => ipcRenderer.invoke('relay:setBackupPassword', pw),
-  backupNow: () => ipcRenderer.invoke('relay:backupNow'),
+  backupNow: (password) => ipcRenderer.invoke('relay:backupNow', password || null),
+  setBackupSchedule: (o) => ipcRenderer.invoke('relay:setBackupSchedule', o),
   listBackups: () => ipcRenderer.invoke('relay:listBackups'),
   pickFolder: (title) => ipcRenderer.invoke('relay:pickFolder', title),
-  restoreBackup: (dir, restoreSettings) => ipcRenderer.invoke('relay:restoreBackup', dir, restoreSettings),
+  restoreBackup: (dir, restoreSettings, password, confirmed) => ipcRenderer.invoke('relay:restoreBackup', dir, restoreSettings, password || null, !!confirmed),
   onMessage: on('relay:message'),
   onAgents: on('relay:agents'),
   onJobs: on('relay:jobs'),
   onReset: on('relay:reset'),
   onUpdate: on('relay:update'),
-  onRetention: on('relay:retention')
+  onRetention: on('relay:retention'),
+  onTrayBackup: on('relay:trayBackup')
 });

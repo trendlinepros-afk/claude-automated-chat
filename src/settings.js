@@ -30,6 +30,9 @@ const DEFAULTS = {
   backupIntervalHours: 24,  // 0 = manual only
   backupKeep: 10,
   backupIncludeSecrets: false, // include access key + TLS CA in backups (for restoring onto a new PC)
+  backupEncrypt: false,         // encrypt scheduled backups with a password
+  backupEncryptChosen: false,   // the user has answered "encrypt automatic backups?"
+  backupSchedulePasswordEnc: '', // schedule password, locked with Windows DPAPI so unattended backups can run
   lastBackupAt: 0
 };
 
@@ -43,6 +46,8 @@ class Settings {
     // Upgrades from versions without encryption keep plain HTTP so already-configured PCs keep working;
     // the Connect page then offers to turn encryption on. New installs are encrypted from the start.
     if (existing && existing.tls === undefined) { this.data.tls = false; changed = true; }
+    // Upgrades that already had a backup schedule keep running it (unencrypted) until the user changes it.
+    if (existing && existing.backupEncryptChosen === undefined && existing.backupPath) { this.data.backupEncryptChosen = true; changed = true; }
     if (!this.data.accessKey) { this.data.accessKey = crypto.randomBytes(16).toString('hex'); changed = true; }
     if (!this.data.vaultPath) { this.data.vaultPath = defaultVault; changed = true; }
     if (changed) this.save();
@@ -58,7 +63,7 @@ class Settings {
     num('retentionDays', 0, 3650); num('pruneIntervalHours', 0.25, 168); num('memoryThresholdPercent', 0, 99);
     num('maxProcessMemoryMB', 0, 65536); num('maxMessagesInMemory', 0, 10000000); num('memoryPruneKeepDays', 1, 365);
     num('backupIntervalHours', 0, 8760); num('backupKeep', 1, 1000);
-    for (const k of ['requireKey', 'tls', 'backupIncludeSecrets', 'autoUpdate', 'autoInstallUpdates', 'launchAtStartup', 'startMinimized', 'closeToTray', 'notifications']) this.data[k] = !!this.data[k];
+    for (const k of ['requireKey', 'tls', 'backupIncludeSecrets', 'backupEncrypt', 'backupEncryptChosen', 'autoUpdate', 'autoInstallUpdates', 'launchAtStartup', 'startMinimized', 'closeToTray', 'notifications']) this.data[k] = !!this.data[k];
     if (!['system', 'light', 'dark'].includes(this.data.theme)) this.data.theme = 'system';
     this.data.host = String(this.data.host || '0.0.0.0').trim() || '0.0.0.0';
     this.save();

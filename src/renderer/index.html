@@ -173,6 +173,7 @@
           <div class="row"><label>Share password</label><div class="inline"><input id="backup-password" type="password" autocomplete="new-password" placeholder="(unchanged)"><button id="btn-set-backup-pw" class="ghost small">Save credentials</button><span id="backup-pw-status" class="muted"></span></div></div>
           <div class="row"><label>Automatic backup every</label><div class="inline"><input type="number" step="1" min="0" max="8760" data-setting="backupIntervalHours" class="narrow"> hours <span class="muted">(0 = manual only)</span></div></div>
           <div class="row"><label>Keep the newest</label><div class="inline"><input type="number" min="1" max="1000" data-setting="backupKeep" class="narrow"> backups</div></div>
+          <div class="row"><label>Automatic backups</label><div class="inline"><span id="schedule-status"></span><button id="btn-schedule-enc" class="ghost small">Change encryption…</button></div></div>
           <div class="row"><label>Include secrets</label><label class="toggle"><input type="checkbox" data-setting="backupIncludeSecrets"> Also back up the access key and encryption certificate (lets you restore onto a new PC without reconfiguring agents — keep the share locked down)</label></div>
           <div class="row"><label>Status</label><div id="backup-status" class="status-line"></div></div>
           <div class="row"><label></label><div><button id="btn-backup-now" class="primary small">Back up now</button> <button id="btn-list-backups" class="ghost small">Show backups</button> <button id="btn-restore-folder" class="ghost small">Restore from folder…</button> <label class="toggle"><input type="checkbox" id="restore-settings"> also restore settings</label></div></div>
@@ -191,6 +192,7 @@
     </main>
   </div>
   <div id="lightbox" class="hidden"><img id="lightbox-img" alt=""></div>
+  <div id="modal" class="modal-backdrop hidden" role="dialog" aria-modal="true"><div class="modal" id="modal-box"></div></div>
   <div id="toast" class="hidden"></div>
   <script src="app.js"></script>
 </body>

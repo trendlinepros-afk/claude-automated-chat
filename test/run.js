@@ -216,6 +216,47 @@ const t = (r) => r.content.filter(c => c.type === 'text').map(c => c.text).join(
   assert.strictEqual(sset.accessKey, 'KEEPME', 'access key restored');
   console.log('HTTPS + secrets backup OK');
 
+
+  // ---------- encrypted backups ----------
+  const encShare = fs.mkdtempSync(path.join(os.tmpdir(), 'share3-'));
+  const ev = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-ev-'));
+  let estore = new VaultStore(ev, { operatorName: 'Operator' }).init();
+  estore.postMessage({ from: 'PC-A', to: 'PC-B', text: 'top secret plans' });
+  estore.writeNote('private/roadmap.md', '# confidential roadmap');
+  estore.saveStateNow();
+  const eset = { backupPath: encShare, backupKeep: 5, accessKey: 'K', backupEncrypt: true, backupEncryptChosen: true };
+  let schedPw = 'schedule-pass-123';
+  const bm3 = new BackupManager({ getSettings: () => eset, getVaultPath: () => ev, flush: () => estore.saveStateNow(), stopServices: async () => {}, startServices: async () => { estore = new VaultStore(ev, { operatorName: 'Operator' }).init(); }, applySettings: (p3) => Object.assign(eset, p3), getSchedulePassword: () => schedPw, appVersion: 't', log: { info() {}, error() {} } });
+  const eb = await bm3.backup('manual', { password: 'one-time-pass' });
+  assert(eb.manifest.encrypted && fs.existsSync(path.join(eb.path, 'backup.arenc')) && !fs.existsSync(path.join(eb.path, 'vault')), 'single sealed file');
+  const raw = fs.readFileSync(path.join(eb.path, 'backup.arenc'));
+  for (const needle of ['top secret', 'roadmap', 'confidential', 'Chats', 'settings.json']) assert(!raw.includes(Buffer.from(needle)), `"${needle}" must not be readable in the encrypted file`);
+  assert(!JSON.stringify(eb.manifest).includes(ev), 'manifest does not reveal local paths');
+  // scheduled run uses the stored schedule password
+  await new Promise(r => setTimeout(r, 1100));
+  const sbk = await bm3.backup('scheduled', bm3._scheduleOpts());
+  assert(sbk.manifest.encrypted);
+  // never silently falls back to a plain backup
+  schedPw = null;
+  await assert.rejects(() => bm3.backup('scheduled', bm3._scheduleOpts()), /password is unavailable/);
+  assert.strictEqual((await bm3.list()).length, 2, 'no plain backup written');
+  // restore: needs password, wrong password leaves live data untouched
+  estore.postMessage({ from: 'PC-B', to: 'PC-A', text: 'written after backup' });
+  estore.saveStateNow();
+  await assert.rejects(() => bm3.restore(eb.path, {}), e => e.code === 'PASSWORD_REQUIRED');
+  await assert.rejects(() => bm3.restore(eb.path, { password: 'nope-nope' }), e => e.code === 'WRONG_PASSWORD');
+  assert(new VaultStore(ev, {}).init().messages.some(m => m.text === 'written after backup'), 'live vault untouched after wrong password');
+  assert(!fs.existsSync(ev + '.unpacking') && !fs.existsSync(ev + '.restoring'), 'temp folders cleaned up');
+  const er = await bm3.restore(eb.path, { password: 'one-time-pass', restoreSettings: true });
+  assert(estore.messages.some(m => m.text === 'top secret plans') && !estore.messages.some(m => m.text === 'written after backup'), 'restored encrypted backup');
+  assert.strictEqual(estore.readNote('private/roadmap.md'), '# confidential roadmap');
+  assert(fs.existsSync(er.previous), 'previous data kept aside');
+  assert(!fs.existsSync(ev + '.unpacking'), 'decrypted temp copy removed');
+  // the other backup was made with the schedule password, not the one-time one
+  await assert.rejects(() => bm3.restore(sbk.path, { password: 'one-time-pass' }), e => e.code === 'WRONG_PASSWORD');
+  await bm3.restore(sbk.path, { password: 'schedule-pass-123' });
+  console.log('Encrypted backups OK');
+
   console.log('\nALL TESTS PASSED');
   process.exit(0);
 })().catch(e => { console.error(e); process.exit(1); });
