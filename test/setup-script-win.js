@@ -23,7 +23,10 @@ const shells = [['powershell.exe', 'Windows PowerShell 5.1'], ['pwsh.exe', 'Powe
 // Must be asynchronous: the relay server under test runs in this same process.
 function runPs(exe, scriptFile, env) {
   return new Promise((resolve) => {
-    const child = spawn(exe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { env: Object.assign({}, process.env, env) });
+    const e = Object.assign({}, process.env, env);
+    // CI starts us from PowerShell 7, whose module path breaks Windows PowerShell 5.1; a user's window doesn't have it.
+    if (exe === 'powershell.exe') { delete e.PSModulePath; delete e.PSMODULEPATH; for (const k of Object.keys(e)) if (k.toLowerCase() === 'psmodulepath') delete e[k]; }
+    const child = spawn(exe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], { env: e });
     let out = '';
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { out += d; });

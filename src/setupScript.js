@@ -29,7 +29,8 @@ function buildSetupScript(o) {
     lines.push(`New-Item -ItemType Directory -Force (Split-Path $Ca) | Out-Null`);
     lines.push(`& curl.exe -sSk --max-time 20 "$Server/ca.pem" -o $Ca`);
     lines.push(`if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Ca)) { Write-Host "Could not reach $Server - is Agent Relay running there, and is port open in the firewall on that PC?" -ForegroundColor Red; return }`);
-    lines.push(`if ((Get-FileHash $Ca -Algorithm SHA256).Hash -ne $Hash) { Remove-Item $Ca -Force; Write-Host 'STOP: the certificate fingerprint does not match the one shown in Agent Relay. Nothing was changed.' -ForegroundColor Red; return }`);
+    lines.push(`$sha = [Security.Cryptography.SHA256]::Create(); $got = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Ca))).Replace('-', ''); $sha.Dispose()`);
+    lines.push(`if ($got -ne $Hash) { Remove-Item $Ca -Force; Write-Host 'STOP: the certificate fingerprint does not match the one shown in Agent Relay. Nothing was changed.' -ForegroundColor Red; return }`);
     lines.push(`Write-Host '    Certificate verified.' -ForegroundColor Green`);
   } else {
     lines.push(`Write-Host '1/4 Encryption is off on the relay - skipping the certificate step.'`);
