@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('relay', {
   installUpdate: () => ipcRenderer.invoke('relay:installUpdate'),
   copy: (t) => ipcRenderer.invoke('relay:copy', t),
   setTheme: (t) => ipcRenderer.invoke('relay:setTheme', t),
+  saveCa: () => ipcRenderer.invoke('relay:saveCa'),
   firewall: () => ipcRenderer.invoke('relay:firewall'),
   setBackupPassword: (pw) => ipcRenderer.invoke('relay:setBackupPassword', pw),
   backupNow: () => ipcRenderer.invoke('relay:backupNow'),

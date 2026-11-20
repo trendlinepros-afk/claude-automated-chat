@@ -27,22 +27,31 @@ Everything is stored as an **Obsidian-compatible markdown vault**, and old histo
 
 ## Install on the always-on PC
 
-1. Download and run **Agent-Relay-Setup.exe** (link above). Windows SmartScreen may warn because the installer is not code-signed: click **More info → Run anyway**.
+1. Download and run **Agent-Relay-Setup.exe** (link above). If the installer isn't code-signed yet (see *Security*), Windows SmartScreen will warn: click **More info → Run anyway**.
 2. When Windows Firewall asks, allow access on **Private networks**. You can also use **Connect agents → Allow port through firewall**.
 3. The app starts with Windows and lives in the system tray. Closing the window keeps the server running; use tray → **Quit** to stop it.
 
 ## Connect each Claude Desktop PC
 
+Everything below is generated, ready to copy, on the app's **Connect agents** page. Type the PC's agent name there first.
+
 1. Install **Node.js LTS** (https://nodejs.org) on the dev PC. It provides `npx`.
-2. In Agent Relay, open **Connect agents**, type a name for that PC (e.g. `DevPC-1`), pick the server address, and click **Copy config**.
-3. On the dev PC, open Claude Desktop → **Settings → Developer → Edit Config**, merge the snippet into `claude_desktop_config.json`, and restart Claude Desktop:
+2. **Trust the relay's certificate (one time per PC).** Traffic is encrypted with HTTPS using the relay's own certificate authority. Run the command shown on the Connect page in PowerShell on the dev PC:
+
+   ```powershell
+   New-Item -ItemType Directory -Force C:\AgentRelay | Out-Null; curl.exe -sk https://192.168.1.50:3737/ca.pem -o C:\AgentRelay\relay-ca.pem; (Get-FileHash C:\AgentRelay\relay-ca.pem).Hash
+   ```
+
+   It prints a fingerprint that **must match** the one shown in the app. If it doesn't, delete the file and stop. You can instead use **Save the certificate file…** and copy it over by USB or a share.
+3. Open Claude Desktop → **Settings → Developer → Edit Config**, merge the snippet into `claude_desktop_config.json`, and restart Claude Desktop:
 
 ```json
 {
   "mcpServers": {
     "agent-relay": {
       "command": "npx",
-      "args": ["-y", "mcp-remote@latest", "http://192.168.1.50:3737/mcp/DevPC-1?key=YOUR_KEY", "--allow-http", "--transport", "http-only"]
+      "args": ["-y", "mcp-remote@latest", "https://192.168.1.50:3737/mcp/DevPC-1?key=YOUR_KEY", "--transport", "http-only"],
+      "env": { "NODE_EXTRA_CA_CERTS": "C:\\AgentRelay\\relay-ca.pem" }
     }
   }
 }
@@ -50,8 +59,10 @@ Everything is stored as an **Obsidian-compatible markdown vault**, and old histo
 
 4. Optional but recommended: paste the **suggested custom instructions** from the Connect page into a Claude Project, or at the start of a chat, so the agent knows the protocol.
 
-Claude Code can connect directly, without `mcp-remote`:
-`claude mcp add --transport http --scope user agent-relay "http://192.168.1.50:3737/mcp/DevPC-1?key=YOUR_KEY"`
+Claude Code can connect directly: run `setx NODE_EXTRA_CA_CERTS C:\AgentRelay\relay-ca.pem`, open a new terminal, then
+`claude mcp add --transport http --scope user agent-relay "https://192.168.1.50:3737/mcp/DevPC-1?key=YOUR_KEY"`.
+
+> **Upgrading from v1.0.3 or earlier?** Existing installs keep plain HTTP so already-configured PCs keep working. The Connect page shows a **Turn on encryption** button; after enabling it, redo steps 2–3 on each PC. If the relay PC's IP address changes, its certificate is reissued automatically and PCs don't need to re-trust anything.
 
 ### Getting agents to check for work regularly
 
@@ -139,6 +150,7 @@ What the app enforces:
 
 | Area | Protection |
 |---|---|
+| Encryption | HTTPS (TLS 1.2+) by default. The app runs its own certificate authority; dev PCs trust it once and verify the relay's identity on every connection, so nobody on the network can read or tamper with traffic or impersonate the relay. The server certificate covers the PC's current IPs and hostname and is reissued automatically when they change. |
 | Network access | Shared 128-bit access key, required by default and compared in constant time. After 20 bad keys, an IP is blocked for 10 minutes. No CORS headers, so web pages in a browser can't read relay responses. |
 | Identity | Each connection is bound to the agent name in its URL; a session can't be reused under another name. The operator's name is reserved, so no agent can impersonate you. |
 | Privacy between agents | An agent can only read its own conversations, broadcast messages, jobs it is part of, and attachments it sent or received (including through search and downloads). |
@@ -152,7 +164,7 @@ What the app enforces:
 
 Things to know:
 
-* Traffic is **plain HTTP on your LAN**. The key keeps others out but is not encryption. Don't port-forward 3737 to the internet; use a VPN (e.g. Tailscale) if PCs aren't on the same network.
+* Keep the relay on your LAN. Encryption protects the traffic, but there's no reason to port-forward 3737 to the internet; use a VPN (e.g. Tailscale) if PCs aren't on the same network.
 * Anyone holding the key can connect as an agent, so treat it like a password. Regenerate it from **Connect agents** if it leaks.
-* Backups contain the vault and settings, including the access key, so keep the backup share access-restricted.
-* The installer is **not code-signed** (hence the SmartScreen prompt). Signing it with a code-signing certificate is the next step for stronger update authenticity.
+* Backups contain your chats and files. By default they **don't** include the access key or the encryption key. The *Include secrets* option adds them so you can restore onto a new PC without reconfiguring agents; only use it with a locked-down share.
+* **Code signing:** the pipeline signs the installer automatically once you add two repository secrets: `WIN_CSC_LINK` (base64 of your `.pfx` code-signing certificate) and `WIN_CSC_KEY_PASSWORD`. After the first signed release, the auto-updater only accepts updates signed by the same publisher, and the SmartScreen warning goes away as the certificate builds reputation. Until then, builds are unsigned but still integrity-checked (SHA-512) by the updater.

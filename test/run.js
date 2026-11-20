@@ -112,6 +112,8 @@ const t = (r) => r.content.filter(c => c.type === 'text').map(c => c.text).join(
   const b1 = await bm.backup('manual');
   assert(fs.existsSync(path.join(b1.path, 'vault', 'Jobs')));
   assert(!JSON.parse(fs.readFileSync(path.join(b1.path, 'settings.json'), 'utf8')).backupPasswordEnc, 'password not copied to share');
+  assert(!JSON.parse(fs.readFileSync(path.join(b1.path, 'settings.json'), 'utf8')).accessKey, 'access key excluded by default');
+  assert(!fs.existsSync(path.join(b1.path, 'secrets')), 'no secrets by default');
   const countAtBackup = live.messages.length;
   live.postMessage({ from: 'PC-A', to: 'PC-B', text: 'after backup' });
   await new Promise(r => setTimeout(r, 1100)); await bm.backup('scheduled');
@@ -178,6 +180,42 @@ const t = (r) => r.content.filter(c => c.type === 'text').map(c => c.text).join(
 
   await a.close(); await b.close();
   await srv.stop();
+
+  // ---------- HTTPS mode + secrets in backups ----------
+  const https = require('https');
+  const { ensureCerts } = require('../src/tls');
+  const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-tls-'));
+  const t1 = ensureCerts(certDir, { info() {} });
+  assert(!ensureCerts(certDir, { info() {} }).reissued, 'certificate reused when addresses are unchanged');
+  assert.strictEqual(ensureCerts(certDir, { info() {} }).caHash, t1.caHash, 'CA is stable');
+  const tset = Object.assign({}, settings, { tls: true, port: settings.port + 1 });
+  const tsrv = new RelayServer(new VaultStore(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-v-')), {}).init(), () => tset, { info() {}, error: console.error }, () => ensureCerts(certDir, { info() {} }));
+  await tsrv.start();
+  assert(tsrv.status.running && tsrv.status.tls, 'https server running');
+  const get = (url, opts) => new Promise((res, rej) => https.get(url, opts, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res({ status: r.statusCode, body: d })); }).on('error', rej));
+  const okRes = await get(`https://127.0.0.1:${tset.port}/health`, { ca: t1.caPem });
+  assert.strictEqual(JSON.parse(okRes.body).tls, true, 'verified TLS connection with the relay CA');
+  await assert.rejects(() => get(`https://127.0.0.1:${tset.port}/health`, {}), /self.signed|unable to verify|certificate/i, 'untrusted without the CA');
+  await assert.rejects(() => get(`https://127.0.0.1:${tset.port}/health`, { ca: t1.caPem, servername: 'evil.example', checkServerIdentity: require('tls').checkServerIdentity.bind(null, 'evil.example') }), /altnames|does not match|Hostname/i, 'wrong host name rejected');
+  const caRes = await get(`https://127.0.0.1:${tset.port}/ca.pem`, { ca: t1.caPem });
+  assert(caRes.body.includes('BEGIN CERTIFICATE') && !caRes.body.includes('PRIVATE'), 'ca.pem is public cert only');
+  assert.strictEqual(tsrv.connectionInfo().caHash, require('../src/tls').fileHash(caRes.body), 'fingerprint matches downloaded file');
+  await tsrv.stop();
+  // Backups with secrets carry the CA + key and restore them.
+  const secretShare = fs.mkdtempSync(path.join(os.tmpdir(), 'share2-'));
+  const sv = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-sv-'));
+  new VaultStore(sv, {}).init().saveStateNow();
+  const sset = { backupPath: secretShare, backupKeep: 5, backupIncludeSecrets: true, accessKey: 'KEEPME' };
+  const bm2 = new BackupManager({ getSettings: () => sset, getVaultPath: () => sv, stopServices: async () => {}, startServices: async () => {}, applySettings: (p2) => Object.assign(sset, p2), tlsDir: certDir, appVersion: 't', log: { info() {}, error: console.error } });
+  const sb = await bm2.backup('manual');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.path, 'settings.json'), 'utf8')).accessKey, 'KEEPME');
+  assert(fs.existsSync(path.join(sb.path, 'secrets', 'tls', 'ca.key')) && sb.manifest.includesSecrets);
+  fs.writeFileSync(path.join(certDir, 'ca.pem'), 'tampered'); sset.accessKey = 'changed';
+  await bm2.restore(sb.path, { restoreSettings: true });
+  assert.strictEqual(fs.readFileSync(path.join(certDir, 'ca.pem'), 'utf8'), t1.caPem, 'CA restored');
+  assert.strictEqual(sset.accessKey, 'KEEPME', 'access key restored');
+  console.log('HTTPS + secrets backup OK');
+
   console.log('\nALL TESTS PASSED');
   process.exit(0);
 })().catch(e => { console.error(e); process.exit(1); });

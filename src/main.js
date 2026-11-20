@@ -9,6 +9,7 @@ const { Retention } = require('./retention');
 const { Settings } = require('./settings');
 const { Updater } = require('./updater');
 const { BackupManager, uncRoot, netUse } = require('./backup');
+const { ensureCerts } = require('./tls');
 
 log.initialize();
 log.transports.file.maxSize = 5 * 1024 * 1024;
@@ -108,7 +109,7 @@ function initStore() {
 
 async function startServices() {
   initStore();
-  relay = new RelayServer(store, () => settings.get(), log);
+  relay = new RelayServer(store, () => settings.get(), log, () => ensureCerts(tlsDir(), log));
   await relay.start();
   retention = new Retention(store, () => settings.get(), log);
   retention.start();
@@ -139,6 +140,8 @@ async function connectShare(target) {
   return r;
 }
 
+function tlsDir() { return path.join(app.getPath('userData'), 'tls'); }
+
 function initBackup() {
   backup = new BackupManager({
     getSettings: () => settings.get(),
@@ -148,6 +151,7 @@ function initBackup() {
     startServices: async () => { await startServices(); send('relay:reset'); },
     applySettings: (patch) => settings.update(patch),
     connectShare,
+    tlsDir: tlsDir(),
     appVersion: app.getVersion(),
     log
   });
@@ -200,7 +204,7 @@ function registerIpc() {
     const after = settings.update(patch);
     applyTheme();
     applyLoginItem();
-    const needsRestart = ['port', 'host', 'vaultPath', 'operatorName'].some(k => before[k] !== after[k]);
+    const needsRestart = ['port', 'host', 'vaultPath', 'operatorName', 'tls'].some(k => before[k] !== after[k]);
     if (needsRestart) await restartServices();
     else if (before.pruneIntervalHours !== after.pruneIntervalHours) retention.start();
     updater.configure();
@@ -249,6 +253,14 @@ function registerIpc() {
     const a = store.getAttachment(String(id));
     if (!a) return false;
     if (SAFE_OPEN_EXT.test(a.abs)) shell.openPath(a.abs); else shell.showItemInFolder(a.abs);
+    return true;
+  });
+  ipcMain.handle('relay:saveCa', async () => {
+    const info = relay.connectionInfo();
+    if (!info.tls || !relay.tls) return false;
+    const r = await dialog.showSaveDialog(win, { title: 'Save the relay certificate (copy it to each dev PC)', defaultPath: 'relay-ca.pem', filters: [{ name: 'Certificate', extensions: ['pem'] }] });
+    if (r.canceled || !r.filePath) return false;
+    fs.writeFileSync(r.filePath, relay.tls.caPem);
     return true;
   });
   ipcMain.handle('relay:setTheme', (_e, theme) => {

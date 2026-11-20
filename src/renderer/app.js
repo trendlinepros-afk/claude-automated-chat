@@ -300,6 +300,10 @@ function openJob(id) {
 // ---------- connect ----------
 function renderConnect() {
   $('#nokey-banner').classList.toggle('hidden', !!snap.connection.key);
+  $('#notls-banner').classList.toggle('hidden', !!snap.connection.tls || !snap.connection.status.running);
+  $('#conn-tls').innerHTML = snap.connection.tls
+    ? `🔒 HTTPS — certificate fingerprint <code class="small-text" style="overflow-wrap:anywhere">${esc(snap.connection.caHash)}</code>`
+    : '🔓 <span style="color:var(--warn)">Off — plain HTTP</span>';
   const c = snap.connection;
   $('#conn-status').innerHTML = c.status.running ? `<span class="dot on"></span> Running on port <b>${c.port}</b> · ${c.sessions} active MCP session(s) · host <b>${esc(c.hostname)}</b>` : `<span class="dot err"></span> ${esc(c.status.error || 'Stopped')}`;
   $('#conn-addresses').innerHTML = c.addresses.map(a => `${esc(a.address)} <span class="muted">(${esc(a.iface)})</span>`).join('<br>') || 'No network interfaces found';
@@ -313,13 +317,26 @@ function renderConnect() {
 function mcpUrl() {
   const c = snap.connection;
   const name = ($('#conn-agent').value || 'DevPC-1').replace(/[^A-Za-z0-9_.-]/g, '');
-  return `http://${$('#conn-ip').value || 'localhost'}:${c.port}/mcp/${name}${c.key ? `?key=${c.key}` : ''}`;
+  return `${c.protocol || 'http'}://${$('#conn-ip').value || 'localhost'}:${c.port}/mcp/${name}${c.key ? `?key=${c.key}` : ''}`;
 }
 function updateSnippet() {
   const url = mcpUrl();
-  const cfg = { mcpServers: { 'agent-relay': { command: 'npx', args: ['-y', 'mcp-remote@latest', url, '--allow-http', '--transport', 'http-only'] } } };
-  $('#conn-snippet').textContent = JSON.stringify(cfg, null, 2);
-  $('#conn-cc').textContent = `claude mcp add --transport http --scope user agent-relay "${url}"`;
+  const c = snap.connection;
+  const CA_PATH = 'C:\\AgentRelay\\relay-ca.pem';
+  const server = c.tls
+    ? { command: 'npx', args: ['-y', 'mcp-remote@latest', url, '--transport', 'http-only'], env: { NODE_EXTRA_CA_CERTS: CA_PATH } }
+    : { command: 'npx', args: ['-y', 'mcp-remote@latest', url, '--allow-http', '--transport', 'http-only'] };
+  $('#conn-snippet').textContent = JSON.stringify({ mcpServers: { 'agent-relay': server } }, null, 2);
+  $('#trust-step').classList.toggle('hidden', !c.tls);
+  $('#cfg-step-title').textContent = c.tls ? '3. Add the relay to Claude Desktop' : '2. Add the relay to Claude Desktop';
+  if (c.tls) {
+    const host = $('#conn-ip').value || 'localhost';
+    $('#conn-fp').textContent = c.caHash;
+    $('#conn-trust').textContent = `New-Item -ItemType Directory -Force C:\\AgentRelay | Out-Null; curl.exe -sk https://${host}:${c.port}/ca.pem -o ${CA_PATH}; (Get-FileHash ${CA_PATH}).Hash`;
+  }
+  $('#conn-cc').textContent = c.tls
+    ? `setx NODE_EXTRA_CA_CERTS ${CA_PATH}\n# open a NEW terminal, then:\nclaude mcp add --transport http --scope user agent-relay "${url}"`
+    : `claude mcp add --transport http --scope user agent-relay "${url}"`;
   const name = ($('#conn-agent').value || 'DevPC-1');
   $('#conn-instructions').textContent = `You are "${name}", one of several Claude agents that coordinate through the "agent-relay" MCP server.\n` +
     `- At the start of every conversation, call whoami and check_messages.\n` +
@@ -331,6 +348,13 @@ function updateSnippet() {
 $('#conn-agent').addEventListener('input', updateSnippet);
 $('#conn-ip').addEventListener('change', updateSnippet);
 $('#btn-copy-snippet').onclick = () => { relay.copy($('#conn-snippet').textContent); toast('Config copied'); };
+$('#btn-copy-trust').onclick = () => { relay.copy($('#conn-trust').textContent); toast('Command copied — run it in PowerShell on the dev PC'); };
+$('#btn-save-ca').onclick = async () => { if (await relay.saveCa()) toast('Certificate saved — copy it to C:\\AgentRelay\\relay-ca.pem on each dev PC', 5000); };
+$('#btn-enable-tls').onclick = async () => {
+  if (!confirm('Turn on encryption? The server restarts, and each dev PC must trust the certificate and use the new config shown on this page.')) return;
+  snap = await relay.saveSettings({ tls: true });
+  renderConnect(); toast('Encryption is on — update each PC with the steps below', 5000);
+};
 $('#btn-copy-cc').onclick = () => { relay.copy($('#conn-cc').textContent); toast('Command copied'); };
 $('#btn-copy-instr').onclick = () => { relay.copy($('#conn-instructions').textContent); toast('Instructions copied'); };
 $('#btn-copy-key').onclick = () => { relay.copy(snap.connection.key); toast('Key copied'); };

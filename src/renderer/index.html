@@ -87,18 +87,29 @@
       <section id="view-connect" class="view scroll">
         <header class="page-header"><h1>Connect agents</h1></header>
         <div id="nokey-banner" class="banner hidden">⚠️ The access key is turned off — anyone on your network can connect as an agent. Turn on <b>Require access key</b> in Settings.</div>
+        <div id="notls-banner" class="banner hidden">🔓 Traffic between PCs is <b>not encrypted</b>. <button id="btn-enable-tls" class="primary small">Turn on encryption</button> <span class="muted">Each PC then needs the updated setup below (one-time).</span></div>
         <div class="card">
           <h2>Server</h2>
           <div id="conn-status"></div>
+          <div class="row"><label>Encryption</label><div id="conn-tls"></div></div>
           <div class="row"><label>Addresses on this network</label><div id="conn-addresses" class="mono"></div></div>
           <div class="row"><label>Access key</label><div><code id="conn-key"></code> <button id="btn-copy-key" class="ghost small">Copy</button> <button id="btn-regen-key" class="ghost small">Regenerate</button></div></div>
           <div class="row"><label>Windows Firewall</label><div><button id="btn-firewall" class="ghost small">Allow port through firewall (admin)</button> <span class="muted">Needed so other PCs can reach this one.</span></div></div>
         </div>
         <div class="card">
           <h2>Add a Claude Desktop computer</h2>
-          <p class="muted">On each development PC: install <a href="https://nodejs.org" target="_blank">Node.js LTS</a>, then open Claude Desktop → Settings → Developer → Edit Config and merge the snippet below into <code>claude_desktop_config.json</code>. Restart Claude Desktop.</p>
           <div class="row"><label>Agent name for that PC</label><input id="conn-agent" value="DevPC-1" maxlength="40"></div>
           <div class="row"><label>Server address</label><select id="conn-ip"></select></div>
+          <h3>1. Install Node.js</h3>
+          <p class="muted">Install <a href="https://nodejs.org" target="_blank">Node.js LTS</a> on the dev PC (provides <code>npx</code>).</p>
+          <div id="trust-step">
+            <h3>2. Trust this relay's certificate (one time per PC)</h3>
+            <p class="muted">Run this in PowerShell on the dev PC. It downloads the relay's public certificate and prints its fingerprint — it <b>must</b> match <code id="conn-fp"></code>. If it doesn't, delete the file and don't continue.</p>
+            <pre id="conn-trust" class="code"></pre>
+            <button id="btn-copy-trust" class="ghost small">Copy command</button> <button id="btn-save-ca" class="ghost small">Or save the certificate file…</button>
+          </div>
+          <h3 id="cfg-step-title">3. Add the relay to Claude Desktop</h3>
+          <p class="muted">Claude Desktop → Settings → Developer → Edit Config, merge this into <code>claude_desktop_config.json</code>, then restart Claude Desktop.</p>
           <pre id="conn-snippet" class="code"></pre>
           <button id="btn-copy-snippet" class="primary small">Copy config</button>
           <h3>Claude Code (optional)</h3>
@@ -133,6 +144,7 @@
           <h2>Server</h2>
           <div class="row"><label>Port</label><input type="number" min="1" max="65535" data-setting="port" class="narrow"></div>
           <div class="row"><label>Bind address</label><input data-setting="host"></div>
+          <div class="row"><label>Encrypt traffic (HTTPS)</label><label class="toggle"><input type="checkbox" data-setting="tls"> Recommended — dev PCs must trust the relay certificate once (see Connect agents)</label></div>
           <div class="row"><label>Require access key</label><label class="toggle"><input type="checkbox" data-setting="requireKey"> Recommended</label></div>
           <div class="row"><label>Your name in chat</label><input data-setting="operatorName" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*"></div>
         </div>
@@ -161,6 +173,7 @@
           <div class="row"><label>Share password</label><div class="inline"><input id="backup-password" type="password" autocomplete="new-password" placeholder="(unchanged)"><button id="btn-set-backup-pw" class="ghost small">Save credentials</button><span id="backup-pw-status" class="muted"></span></div></div>
           <div class="row"><label>Automatic backup every</label><div class="inline"><input type="number" step="1" min="0" max="8760" data-setting="backupIntervalHours" class="narrow"> hours <span class="muted">(0 = manual only)</span></div></div>
           <div class="row"><label>Keep the newest</label><div class="inline"><input type="number" min="1" max="1000" data-setting="backupKeep" class="narrow"> backups</div></div>
+          <div class="row"><label>Include secrets</label><label class="toggle"><input type="checkbox" data-setting="backupIncludeSecrets"> Also back up the access key and encryption certificate (lets you restore onto a new PC without reconfiguring agents — keep the share locked down)</label></div>
           <div class="row"><label>Status</label><div id="backup-status" class="status-line"></div></div>
           <div class="row"><label></label><div><button id="btn-backup-now" class="primary small">Back up now</button> <button id="btn-list-backups" class="ghost small">Show backups</button> <button id="btn-restore-folder" class="ghost small">Restore from folder…</button> <label class="toggle"><input type="checkbox" id="restore-settings"> also restore settings</label></div></div>
           <div id="backup-list"></div>

@@ -127,10 +127,16 @@ class BackupManager {
       const vault = this.d.getVaultPath();
       fs.cpSync(vault, path.join(tmp, 'vault'), { recursive: true, force: true, errorOnExist: false });
       const settings = Object.assign({}, this.d.getSettings());
-      delete settings.backupPasswordEnc; // never copy credentials to the share
+      delete settings.backupPasswordEnc; // the share password is never copied to the share
+      const withSecrets = !!settings.backupIncludeSecrets;
+      if (!withSecrets) delete settings.accessKey;
       fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify(settings, null, 2));
+      if (withSecrets && this.d.tlsDir && fs.existsSync(path.join(this.d.tlsDir, 'ca.key'))) {
+        fs.mkdirSync(path.join(tmp, 'secrets', 'tls'), { recursive: true });
+        for (const f of ['ca.pem', 'ca.key']) fs.copyFileSync(path.join(this.d.tlsDir, f), path.join(tmp, 'secrets', 'tls', f));
+      }
       const st = dirStats(path.join(tmp, 'vault'));
-      const manifest = { app: 'agent-relay', version: this.d.appVersion, created: new Date().toISOString(), host: os.hostname(), reason, files: st.files, bytes: st.bytes, vaultPath: vault };
+      const manifest = { app: 'agent-relay', version: this.d.appVersion, created: new Date().toISOString(), host: os.hostname(), reason, files: st.files, bytes: st.bytes, vaultPath: vault, includesSecrets: withSecrets };
       fs.writeFileSync(path.join(tmp, 'manifest.json'), JSON.stringify(manifest, null, 2));
       fs.renameSync(tmp, final); // only complete backups get the final name
       const pruned = this._prune(target);
@@ -218,7 +224,15 @@ class BackupManager {
           const s = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
           // Keep machine-specific values from the current install.
           for (const k of ['vaultPath', 'backupPath', 'backupUser', 'backupPasswordEnc', 'lastBackupAt']) delete s[k];
+          if (!s.accessKey) delete s.accessKey; // backups without secrets keep this PC's current key
           this.d.applySettings && this.d.applySettings(s);
+          // Restore the encryption CA too (if the backup has it) so agents that already trust it keep working.
+          const secretTls = path.join(dir, 'secrets', 'tls');
+          if (this.d.tlsDir && fs.existsSync(path.join(secretTls, 'ca.key'))) {
+            fs.mkdirSync(this.d.tlsDir, { recursive: true });
+            for (const f of fs.readdirSync(this.d.tlsDir)) if (/^server\./.test(f)) fs.rmSync(path.join(this.d.tlsDir, f), { force: true });
+            for (const f of ['ca.pem', 'ca.key']) fs.copyFileSync(path.join(secretTls, f), path.join(this.d.tlsDir, f));
+          }
         } catch (e) { this.log.error('[backup] settings restore skipped: ' + e.message); }
       }
       await this.d.startServices(); stopped = false;

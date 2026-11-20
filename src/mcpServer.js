@@ -7,8 +7,10 @@
  *   POST /upload/<AgentName>?key=..&filename=..        raw upload, returns attachment id
  *   GET  /files/<AgentName>/<attachmentId>?key=..      download an attachment visible to that agent
  *   GET  /health                                       liveness probe (no auth)
+ *   GET  /ca.pem                                       the relay's public CA certificate (no auth; HTTPS mode)
  */
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
 const { z } = require('zod');
@@ -97,10 +99,15 @@ const attachmentInput = z.array(z.object({
 })).max(20).optional().describe('Files to attach (text or base64)');
 
 class RelayServer {
-  constructor(store, getSettings, log = console) {
+  /**
+   * @param getTls optional () => {cert, key, caPem, caHash} — called when settings.tls is on
+   */
+  constructor(store, getSettings, log = console, getTls = null) {
     this.store = store;
     this.getSettings = getSettings;
     this.log = log;
+    this.getTls = getTls;
+    this.tls = null;
     this.sessions = new Map(); // sessionId -> {transport, server, agent, lastActivity}
     this.authFails = new Map(); // ip -> {count, since}
     this.httpServer = null;
@@ -152,10 +159,32 @@ class RelayServer {
   async start() {
     await this.stop();
     const s = this.getSettings();
-    this.httpServer = http.createServer((req, res) => this._handle(req, res).catch(e => {
+    const handler = (req, res) => this._handle(req, res).catch(e => {
       this.log.error('[http] ' + (e.stack || e));
       sendJson(res, e.status || 500, { error: e.message });
-    }));
+    });
+    this.tls = null;
+    if (s.tls) {
+      try { this.tls = this.getTls ? this.getTls() : null; } catch (e) { this.log.error('[tls] ' + e.message); }
+      if (!this.tls) {
+        this.status = { running: false, error: 'Encryption is on but the certificate could not be created — see logs', port: s.port, tls: true };
+        return this.status;
+      }
+      this.httpServer = https.createServer({ key: this.tls.key, cert: this.tls.cert, minVersion: 'TLSv1.2' }, handler);
+      // Re-issue the server certificate if this PC's IP addresses change (no restart, no re-trust needed).
+      this.tlsWatch = setInterval(() => {
+        try {
+          const t = this.getTls();
+          if (t && t.cert !== this.tls.cert && this.httpServer && this.httpServer.setSecureContext) {
+            this.httpServer.setSecureContext({ key: t.key, cert: t.cert, minVersion: 'TLSv1.2' });
+            this.tls = t;
+            this.log.info('[tls] server certificate refreshed');
+          }
+        } catch (e) { this.log.error('[tls] refresh failed: ' + e.message); }
+      }, 5 * 60 * 1000);
+    } else {
+      this.httpServer = http.createServer(handler);
+    }
     this.httpServer.requestTimeout = 0;      // allow long-poll / SSE
     this.httpServer.headersTimeout = 30000;
     this.httpServer.maxHeadersCount = 100;
@@ -164,10 +193,10 @@ class RelayServer {
       this.httpServer.once('error', reject);
       this.httpServer.listen(s.port, s.host || '0.0.0.0', () => { this.httpServer.off('error', reject); resolve(); });
     }).then(() => {
-      this.status = { running: true, error: null, port: s.port };
-      this.log.info(`[mcp] listening on ${s.host}:${s.port}`);
+      this.status = { running: true, error: null, port: s.port, tls: !!this.tls };
+      this.log.info(`[mcp] listening on ${this.tls ? 'https' : 'http'}://${s.host}:${s.port}`);
     }).catch(e => {
-      this.status = { running: false, error: e.code === 'EADDRINUSE' ? `Port ${s.port} is already in use` : e.message, port: s.port };
+      this.status = { running: false, error: e.code === 'EADDRINUSE' ? `Port ${s.port} is already in use` : e.message, port: s.port, tls: !!this.tls };
       this.log.error('[mcp] failed to start: ' + e.message);
     });
     this.reaper = setInterval(() => this._reap(), 60000);
@@ -176,6 +205,7 @@ class RelayServer {
 
   async stop() {
     clearInterval(this.reaper);
+    clearInterval(this.tlsWatch);
     for (const [id, sess] of this.sessions) { try { await sess.transport.close(); } catch { /* ignore */ } this.sessions.delete(id); }
     if (this.httpServer) {
       const srv = this.httpServer; this.httpServer = null;
@@ -194,7 +224,10 @@ class RelayServer {
 
   connectionInfo() {
     const s = this.getSettings();
-    return { port: s.port, key: s.requireKey ? s.accessKey : '', addresses: lanAddresses(), hostname: os.hostname(), status: this.status, sessions: this.sessions.size };
+    return {
+      port: s.port, key: s.requireKey ? s.accessKey : '', addresses: lanAddresses(), hostname: os.hostname(), status: this.status, sessions: this.sessions.size,
+      tls: !!this.tls, protocol: this.tls ? 'https' : 'http', caHash: this.tls ? this.tls.caHash : null
+    };
   }
 
   async _handle(req, res) {
@@ -204,7 +237,12 @@ class RelayServer {
     // No CORS: MCP clients are not browsers. Without CORS headers a malicious web page cannot read responses.
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-    if (parts[0] === 'health') return sendJson(res, 200, { ok: true, app: 'agent-relay', sessions: this.sessions.size });
+    if (parts[0] === 'health') return sendJson(res, 200, { ok: true, app: 'agent-relay', tls: !!this.tls });
+    if (parts[0] === 'ca.pem' && this.tls) {
+      // Public certificate only (never the key). Verify its fingerprint against the one shown in the app.
+      res.writeHead(200, { 'Content-Type': 'application/x-pem-file', 'Content-Disposition': 'attachment; filename="relay-ca.pem"', 'X-Content-Type-Options': 'nosniff' });
+      return res.end(this.tls.caPem);
+    }
     // Respond 404 to OAuth discovery so mcp-remote does not start an OAuth flow.
     if (parts[0] === '.well-known') return sendJson(res, 404, { error: 'not found' });
 
