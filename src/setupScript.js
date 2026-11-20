@@ -21,22 +21,22 @@ function buildSetupScript(o) {
   lines.push(`& {`);
   lines.push(`$ErrorActionPreference = 'Stop'`);
   lines.push(`$Url = ${psq(o.url)}`);
+  lines.push(`$Server = ${psq(o.server)}`);
   if (o.tls) {
-    lines.push(`$Server = ${psq(o.server)}`);
     lines.push(`$Ca = ${psq(caPath)}`);
     lines.push(`$Hash = ${psq(o.caHash)}`);
-    lines.push(`Write-Host '1/3 Downloading the relay certificate...'`);
+    lines.push(`Write-Host '1/4 Downloading the relay certificate...'`);
     lines.push(`New-Item -ItemType Directory -Force (Split-Path $Ca) | Out-Null`);
     lines.push(`& curl.exe -sSk --max-time 20 "$Server/ca.pem" -o $Ca`);
     lines.push(`if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Ca)) { Write-Host "Could not reach $Server - is Agent Relay running there, and is port open in the firewall on that PC?" -ForegroundColor Red; return }`);
     lines.push(`if ((Get-FileHash $Ca -Algorithm SHA256).Hash -ne $Hash) { Remove-Item $Ca -Force; Write-Host 'STOP: the certificate fingerprint does not match the one shown in Agent Relay. Nothing was changed.' -ForegroundColor Red; return }`);
     lines.push(`Write-Host '    Certificate verified.' -ForegroundColor Green`);
   } else {
-    lines.push(`Write-Host '1/3 Encryption is off on the relay - skipping the certificate step.'`);
+    lines.push(`Write-Host '1/4 Encryption is off on the relay - skipping the certificate step.'`);
   }
-  lines.push(`Write-Host '2/3 Checking for Node.js...'`);
+  lines.push(`Write-Host '2/4 Checking for Node.js...'`);
   lines.push(`if (Get-Command npx -ErrorAction SilentlyContinue) { Write-Host '    Node.js found.' -ForegroundColor Green } else { Write-Host '    Node.js was not found. Install the LTS version from https://nodejs.org, then restart Claude Desktop.' -ForegroundColor Yellow }`);
-  lines.push(`Write-Host '3/3 Updating Claude Desktop config...'`);
+  lines.push(`Write-Host '3/4 Updating Claude Desktop config...'`);
   // Config locations: normal install, Microsoft Store install, or an explicit override (used by tests).
   lines.push(`$paths = @()`);
   lines.push(`if ($env:AGENT_RELAY_CONFIG_PATHS) { $paths = $env:AGENT_RELAY_CONFIG_PATHS -split ';' } else {`);
@@ -80,6 +80,19 @@ function buildSetupScript(o) {
   lines.push(`  [IO.File]::WriteAllText($p, $json, (New-Object System.Text.UTF8Encoding $false))`);
   lines.push(`  Write-Host "    Updated $p" -ForegroundColor Green`);
   lines.push(`}`);
+  // 4) Test the connection the same way mcp-remote will, and say exactly what to fix.
+  lines.push(`Write-Host '4/4 Testing the connection to the relay...'`);
+  lines.push(`$u = [Uri]$Server`);
+  lines.push(`$tcp = New-Object System.Net.Sockets.TcpClient`);
+  lines.push(`$reach = $false; try { $reach = $tcp.ConnectAsync($u.Host, $u.Port).Wait(4000) -and $tcp.Connected } catch { } finally { $tcp.Close() }`);
+  lines.push(`if (-not $reach) {`);
+  lines.push(`  Write-Host "    Can't reach $($u.Host) on port $($u.Port)." -ForegroundColor Red`);
+  lines.push(`  Write-Host '    On the relay PC: make sure Agent Relay is running, then Connect agents -> "Allow port through firewall (admin)". Also check its IP address has not changed.' -ForegroundColor Yellow`);
+  lines.push(`} elseif (Get-Command node -ErrorAction SilentlyContinue) {`);
+  if (o.tls) lines.push(`  $env:NODE_EXTRA_CA_CERTS = $Ca`);
+  lines.push(`  $res = & node -e "fetch(process.argv[1] + '/health').then(r => r.text()).then(t => console.log('OK ' + t), e => { const c = e.cause || e; console.log('ERR ' + (c.code || '') + ' ' + c.message) })" $Server 2>&1 | Out-String`);
+  lines.push(`  if ($res -match '^OK .*agent-relay') { Write-Host '    Relay reachable and certificate trusted.' -ForegroundColor Green } elseif ($res -match 'CERT|certificate|self.signed|verify') { Write-Host "    Reached the relay but the certificate was rejected: $($res.Trim())" -ForegroundColor Red; Write-Host '    Run this script again; if it keeps failing, the relay may have a new certificate - copy a fresh script from the Connect page.' -ForegroundColor Yellow } else { Write-Host "    Unexpected answer: $($res.Trim())" -ForegroundColor Red }`);
+  lines.push(`} else { Write-Host '    Port is reachable. (Install Node.js to finish - see step 2.)' -ForegroundColor Yellow }`);
   lines.push(`Write-Host ''`);
   lines.push(`Write-Host 'Done. Fully quit Claude Desktop (system tray icon -> Quit) and start it again.' -ForegroundColor Cyan`);
   lines.push(`}`);

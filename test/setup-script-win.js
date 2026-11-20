@@ -67,6 +67,7 @@ function mcpInitialize(entry) {
     fs.writeFileSync(good, '{\n  "preferences": { "theme": "dark", "list": ["only-one"] },\n  "mcpServers": {\n    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\\\Users"] },\n  }\n}\n');
     const r1 = runPs(exe, scriptFile, { AGENT_RELAY_CONFIG_PATHS: good });
     console.log(r1.out.trim());
+    assert(/Relay reachable and certificate trusted/.test(r1.out), 'built-in connection test passes');
     const cfg = JSON.parse(fs.readFileSync(good, 'utf8').replace(/^\ufeff/, '')); // strict, like Claude Desktop
     assert(!fs.readFileSync(good)[0].toString(16).startsWith('ef'), 'no BOM written');
     assert.deepStrictEqual(cfg.preferences, { theme: 'dark', list: ['only-one'] }, 'other settings preserved (incl. 1-element array)');
